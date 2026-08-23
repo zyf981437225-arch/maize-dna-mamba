@@ -1,0 +1,83 @@
+# @package _global_
+defaults:
+  - /trainer: default
+  - /loader: default
+  - /dataset: full_transcript_rna_mlm
+  - /task: lm
+  - /optimizer: adamw
+  - /scheduler: cosine_warmup_timm
+  - /callbacks: [base, checkpoint]
+  - /model: caduceus
+
+model:
+  _name_: caduceus_lm
+  config:
+    d_model: 768
+    n_layer: 12
+    vocab_size: 12
+    pad_token_id: 4
+    bidirectional: true
+    bidirectional_strategy: add
+    bidirectional_weight_tie: true
+    rcps: false
+
+encoder: null
+decoder: null
+
+task:
+  _name_: lm
+  loss:
+    _name_: cross_entropy
+    ignore_index: 4
+  metrics: null
+  torchmetrics:
+    - perplexity
+    - num_tokens
+
+train:
+  seed: 2222
+  monitor: val/loss
+  mode: min
+  test: true
+  ckpt: null
+  # Set this to the earlier MLM checkpoint for long-context continued
+  # pretraining. Leave null only for a deliberate from-scratch ablation.
+  pretrained_model_path: null
+  pretrained_model_strict_load: true
+  pretrained_model_state_hook:
+    _name_: null
+
+trainer:
+  accelerator: gpu
+  devices: 2
+  num_nodes: 1
+  precision: 16
+  max_epochs: null
+  max_steps: 20000
+  accumulate_grad_batches: 8
+  gradient_clip_val: 0.5
+  num_sanity_val_steps: 0
+  log_every_n_steps: 10
+  limit_train_batches: 1.0
+  limit_val_batches: 1.0
+
+loader:
+  num_workers: 8
+  pin_memory: true
+  drop_last: false
+
+optimizer:
+  lr: 8e-5
+  weight_decay: 0.01
+  betas: [0.9, 0.98]
+
+scheduler:
+  t_in_epochs: false
+  t_initial: 20000
+  warmup_t: 2000
+  lr_min: 2e-5
+  warmup_lr_init: 1e-6
+
+callbacks:
+  periodic_checkpoint:
+    every_n_epochs: 1

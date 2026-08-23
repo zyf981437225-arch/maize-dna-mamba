@@ -1,0 +1,17 @@
+_name_: m6a_site
+loss: binary_cross_entropy
+metrics: null
+torchmetrics:
+  - m6a_average_precision
+  - m6a_auroc
+  - m6a_precision
+  - m6a_recall
+  - m6a_f1
+  - m6a_accuracy
+  - m6a_positive_rate
+
+# The training split determines (negative A)/(positive A). The cap prevents an
+# unexpectedly filtered split from producing unstable gradients.
+pos_weight: auto
+max_pos_weight: 100.0
+ignore_index: -100.0

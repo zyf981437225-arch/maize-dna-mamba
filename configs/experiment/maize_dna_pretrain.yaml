@@ -1,0 +1,85 @@
+# @package _global_
+# Formal single-A100 configuration. max_steps and warmup_t are deliberately
+# mandatory so a long run cannot start before the pilot benchmark is reviewed.
+defaults:
+  - /trainer: default
+  - /loader: default
+  - /dataset: maize_dna_mlm
+  - /task: lm
+  - /optimizer: adamw
+  - /scheduler: cosine_warmup_timm
+  - /callbacks: [base, checkpoint]
+  - /model: caduceus
+
+model:
+  _name_: caduceus_lm
+  config:
+    d_model: 768
+    n_layer: 12
+    vocab_size: 12
+    pad_token_id: 4
+    bidirectional: true
+    bidirectional_strategy: add
+    bidirectional_weight_tie: true
+    rcps: false
+    use_memory: true
+    memory_d_sum: 64
+    memory_d_mem: 64
+    memory_write_stride: 6
+    memory_read_stride: 2
+    memory_persist_across_batches: false
+
+encoder: null
+decoder: null
+
+task:
+  _name_: lm
+  loss:
+    _name_: cross_entropy
+    ignore_index: 4
+  metrics: null
+  torchmetrics:
+    - perplexity
+    - num_tokens
+
+train:
+  seed: 2222
+  monitor: val/loss
+  mode: min
+  test: false
+  ckpt: null
+  pretrained_model_path: null
+  pretrained_model_strict_load: true
+  pretrained_model_state_hook:
+    _name_: null
+
+trainer:
+  accelerator: gpu
+  devices: 1
+  num_nodes: 1
+  precision: 16
+  max_epochs: null
+  max_steps: ???
+  accumulate_grad_batches: 2
+  gradient_clip_val: 0.5
+  num_sanity_val_steps: 0
+  log_every_n_steps: 50
+  limit_train_batches: 1.0
+  limit_val_batches: 1.0
+
+loader:
+  num_workers: 4
+  pin_memory: true
+  drop_last: false
+
+optimizer:
+  lr: 8e-5
+  weight_decay: 0.01
+  betas: [0.9, 0.98]
+
+scheduler:
+  t_in_epochs: false
+  t_initial: ${trainer.max_steps}
+  warmup_t: ???
+  lr_min: 2e-5
+  warmup_lr_init: 1e-6

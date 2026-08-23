@@ -1,0 +1,73 @@
+# @package _global_
+defaults:
+  - /trainer: default
+  - /loader: default
+  - /dataset: human_m6a_window
+  - /task: regression
+  - /optimizer: adamw
+  - /scheduler: plateau
+  - /callbacks: [base, checkpoint]
+  - /model: caduceus
+
+# Reuse the verified RNA-Mamba backbone and replace only the MLM decoder with
+# masked mean pooling plus a one-output window-count regression head.
+model:
+  _name_: dna_embedding_caduceus
+  config:
+    d_model: 768
+    n_layer: 12
+    vocab_size: 12
+    pad_token_id: 4
+    rcps: false
+
+encoder: id
+decoder:
+  _name_: sequence
+  mode: pool
+  use_lengths: true
+
+task:
+  _name_: base
+  loss: smooth_l1
+  metrics: [mae, mse]
+  torchmetrics: null
+
+train:
+  seed: 2357
+  monitor: val/loss
+  mode: min
+  test: true
+  ckpt: null
+  pretrained_model_path: null
+  pretrained_model_strict_load: false
+  pretrained_model_state_hook:
+    _name_: load_backbone
+    freeze_backbone: false
+
+trainer:
+  accelerator: gpu
+  devices: 1
+  max_epochs: 20
+  precision: 16
+  accumulate_grad_batches: 4
+  gradient_clip_val: 1.0
+  num_sanity_val_steps: 0
+  log_every_n_steps: 10
+
+loader:
+  # Zero is the safest default for native Windows; increase on Linux after the
+  # first successful run.
+  num_workers: 0
+  pin_memory: true
+  drop_last: false
+
+optimizer:
+  lr: 2e-5
+  weight_decay: 0.01
+
+scheduler:
+  patience: 3
+
+callbacks:
+  periodic_checkpoint:
+    every_n_epochs: 5

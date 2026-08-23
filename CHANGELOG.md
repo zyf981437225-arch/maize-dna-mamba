@@ -1,0 +1,37 @@
+# Changelog
+
+## Initial Maize DNA-Mamba implementation
+
+### Project boundary
+
+- Created Maize DNA-Mamba as an independent repository derived from the
+  Caduceus/RNA-Mamba training framework.
+- Made genomic DNA the only registered training data module and the DNA
+  tokenizer the default and enforced sequence type.
+- Preserved the reusable bidirectional backbone, BCW writer, cross-layer
+  memory bank, lightweight reader, MLM task, and checkpoint loader.
+
+### Data and tokenization
+
+- Added A/C/G/T/N single-nucleotide tokenization and DNA complement mapping.
+- Added streaming multi-FASTA parsing, whole-contig split assignment,
+  configurable window/stride generation, ambiguity policies, and U/N gates.
+- Added a fixed-window memory-mapped corpus with deterministic validation/test
+  MLM and attention masks.
+- Added generated `manifest.json` and `DATA_STATS.md` evidence artifacts.
+
+### Training and verification
+
+- Added two-step DNA smoke and guarded 768 × 12 single-A100 configurations.
+- Added direct 10,240-token forward/loss/backward/optimizer validation.
+- Added matched backbone-only versus BCW/memory performance benchmarking.
+- Added tests for DNA token ids, reverse-complement involution, contig safety,
+  split isolation, U gating, deterministic MLM, and memory-reader broadcasting.
+
+### Compatibility
+
+- Kept vocabulary size 12 and base ids A=7, C=8, G=9, T=10, N=11.
+- Architecture-matched legacy checkpoints are shape-compatible, but row 10 is
+  a documented U-to-T semantic remapping and scratch training remains default.
+- Strict RCPS plus memory remains disabled pending the localized repair and
+  numerical equivariance tests documented in `RC_MEMORY_COMPATIBILITY.md`.

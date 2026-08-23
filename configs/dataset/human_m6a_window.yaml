@@ -1,0 +1,19 @@
+_name_: human_m6a
+
+# Directory created by scripts/prepare_human_m6a.py.
+data_dir: ${oc.env:HUMAN_M6A_DATA_DIR,data/processed/human_m6a}
+tokenizer_name: char
+
+# Primary windowing configuration for sparse-site aggregation.
+window_length: 128
+stride: 64
+target_transform: none
+
+batch_size: 8
+batch_size_eval: 16
+shuffle: true
+
+# Optional deterministic limits for smoke tests; null uses every window.
+max_train_windows: null
+max_val_windows: null
+max_test_windows: null

@@ -1,0 +1,29 @@
+_name_: full_transcript_rna_mlm
+
+# Gene-level mRNA splits created by scripts/prepare_m6a_nucleotide.py.
+data_dir: ${oc.env:M6A_FULL_DATA_DIR,data/processed/human_m6a_full_transcript}
+
+# Independent ncRNA records are assigned reproducibly to 80/10/10 splits.
+ncrna_fasta: ${oc.env:RNA_FASTA_FILE,data/rnacentral_small_ATCG_only.fasta}
+include_ncrna: true
+split_seed: 2357
+
+tokenizer_name: char
+max_sequence_length: 10240
+require_mrna_coordinate_reliable: true
+require_cds_boundary_reliable: true
+
+mlm: true
+mlm_probability: 0.15
+
+# Complete sequences are never truncated. Batches are padded only to their
+# longest sequence, and BiMamba reverses only the valid prefix.
+pad_to_multiple: 8
+batch_size: 1
+batch_size_eval: 1
+shuffle: true
+
+# Optional smoke/throughput limits; null uses every eligible sequence.
+max_train_sequences: null
+max_val_sequences: null
+max_test_sequences: null
