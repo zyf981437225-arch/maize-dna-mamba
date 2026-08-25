@@ -1,5 +1,17 @@
 # Changelog
 
+## OneMaize teacher-plan pipeline
+
+- Added annotation-aware `regions.parquet` construction from per-genotype
+  FASTA, protein-coding gene GFF3, and TE GFF3 inputs.
+- Added uniform-genotype and 50/30/20 region-class sampling, dynamic 8K/16K
+  crops, training-only 50% reverse complement, and 15% 80/10/10 DNA MLM.
+- Added B73 chromosome pilot splits and strict formal validation for the
+  26-genotype 23/1/2 split.
+- Added A100 data validation, smoke, Phase-I 8K, and Phase-II 16K launch paths.
+- Retained the bidirectional Caduceus/Mamba, BCW writer, memory pool, and
+  cross-attention reader without changing their implementation files.
+
 ## Initial Maize DNA-Mamba implementation
 
 ### Project boundary

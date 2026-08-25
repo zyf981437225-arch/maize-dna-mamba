@@ -1,0 +1,30 @@
+_name_: onemaize_dna_mlm
+
+data_dir: ${oc.env:ONEMAIZE_DATA_DIR,data/processed/onemaize_b73}
+fasta_root: null
+sequence_type: dna
+species: Zea mays
+tokenizer_name: char
+
+# Teacher-plan curriculum: use 8192 for Phase I and override to 16384 for Phase II.
+context_length: 8192
+mlm_probability: 0.15
+reverse_complement_probability: 0.5
+
+# Hierarchical region-class probabilities. Genotypes are sampled uniformly first.
+gene_probability: 0.5
+non_repeat_probability: 0.3
+te_rich_probability: 0.2
+
+train_samples_per_epoch: 100000
+val_samples_per_epoch: 2048
+test_samples_per_epoch: 2048
+
+batch_size: 1
+batch_size_eval: 1
+# The dataset already samples randomly and uniformly by genotype/class.
+shuffle: false
+seed: 2357
+
+# Formal BGZF inputs must provide .fai and .gzi; only tests may build indexes.
+allow_index_build: false
