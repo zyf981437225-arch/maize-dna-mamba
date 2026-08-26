@@ -42,6 +42,8 @@ class OneMaizeDNAMLM(SequenceDataset):
         seed: int = 2357,
         allow_index_build: bool = False,
         fasta_root: Optional[str] = None,
+        max_n_fraction: Optional[float] = None,
+        max_crop_attempts: int = 16,
         **kwargs,
     ) -> None:
         super().__init__(_name_=_name_, data_dir=to_absolute_path(str(data_dir)))
@@ -70,6 +72,8 @@ class OneMaizeDNAMLM(SequenceDataset):
         self.seed = int(seed)
         self.allow_index_build = bool(allow_index_build)
         self.fasta_root = fasta_root
+        self.max_n_fraction = max_n_fraction
+        self.max_crop_attempts = int(max_crop_attempts)
         self.tokenizer = None
         self.vocab_size = 0
 
@@ -98,6 +102,8 @@ class OneMaizeDNAMLM(SequenceDataset):
                 seed=self.seed,
                 allow_index_build=self.allow_index_build,
                 fasta_root=self.fasta_root,
+                max_n_fraction=self.max_n_fraction,
+                max_crop_attempts=self.max_crop_attempts,
             )
 
         self.dataset_train = make_dataset(

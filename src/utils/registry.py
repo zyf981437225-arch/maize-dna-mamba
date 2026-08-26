@@ -59,6 +59,6 @@ callbacks = {
 }
 
 model_state_hook = {
-    'load_backbone': 'src.models.sequence.dna_embedding.load_backbone',
-    'load_matching_backbone': 'src.models.sequence.dna_embedding.load_matching_backbone',
+    'load_backbone': 'src.models.sequence.checkpoint_hooks.load_backbone',
+    'load_matching_backbone': 'src.models.sequence.checkpoint_hooks.load_matching_backbone',
 }

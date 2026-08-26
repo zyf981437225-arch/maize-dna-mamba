@@ -1,5 +1,19 @@
 # Maize DNA-Mamba architecture audit
 
+## OneMaize plan update
+
+The current supported OneMaize path supersedes the original fixed 10,240-bp
+pilot described later in this historical audit. It uses annotation-aware
+candidate intervals, hierarchical 50/30/20 sampling, and dynamic 8,192- then
+16,384-bp crops. Production dimensions are now 864 × 24 (analytically
+121,191,553 parameters); the separate 512 × 24 pilot is approximately 43.7M.
+
+The supplied real B73 files have been indexed and audited locally. The current
+pilot contains 164,150 candidate intervals after removing candidates above 10%
+N, and real 8K/16K FASTA reads plus MLM masking have passed. See
+`docs/PLAN_COMPLIANCE.md` for the current acceptance boundary. The model, BCW,
+memory bank, and reader conclusions below remain valid.
+
 ## Scope and provenance
 
 Maize DNA-Mamba is an independent genomic-DNA project derived from the

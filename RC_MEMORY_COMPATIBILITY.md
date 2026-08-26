@@ -83,10 +83,10 @@ strict loading.
 
 ## Data augmentation decision
 
-The DNA dataset does not apply random reverse-complement augmentation.
-This avoids silently doubling or randomizing the training distribution before
-the architecture decision is resolved. The benchmark and smoke paths therefore
-measure the existing bidirectional+memory model directly. RC augmentation can
-be added later as an explicit configuration option, but it is not a substitute
-for strict architectural equivariance and should be evaluated as a separate
-ablation.
+The original fixed-window DNA pilot did not apply random reverse-complement
+augmentation. The later teacher-approved OneMaize plan explicitly requires a
+training-only 0.5 reverse-complement probability, which the dynamic dataset now
+implements without duplicating samples. Validation and test remain in forward
+orientation. This does not conflict with a strict-RC architecture because the
+supported memory-enabled model has `rcps=false`; augmentation improves strand
+exposure but is not presented as proof of architectural equivariance.

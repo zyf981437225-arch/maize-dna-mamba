@@ -14,7 +14,9 @@ defaults:
 model:
   _name_: caduceus_lm
   config:
-    d_model: 768
+    # 24 x 768 is only ~96M with the preserved tied BiMamba implementation.
+    # Width 864 keeps 24 blocks and lands near the teacher's ~120M target.
+    d_model: 864
     n_layer: 24
     vocab_size: 12
     pad_token_id: 4

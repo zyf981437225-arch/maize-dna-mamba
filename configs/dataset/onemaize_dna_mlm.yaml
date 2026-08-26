@@ -10,6 +10,10 @@ tokenizer_name: char
 context_length: 8192
 mlm_probability: 0.15
 reverse_complement_probability: 0.5
+# Reject assembly-gap-heavy candidates at build time and retry a crop inside the
+# already-selected genotype/class pool at runtime, preserving 50/30/20 sampling.
+max_n_fraction: 0.1
+max_crop_attempts: 16
 
 # Hierarchical region-class probabilities. Genotypes are sampled uniformly first.
 gene_probability: 0.5

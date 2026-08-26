@@ -1,5 +1,5 @@
 # @package _global_
-# OneMaize Phase II: continue the 8K checkpoint at 16K context.
+# Teacher-plan small ablation: ~44M parameters on the current B73 pilot.
 defaults:
   - /trainer: default
   - /loader: default
@@ -13,7 +13,7 @@ defaults:
 model:
   _name_: caduceus_lm
   config:
-    d_model: 864
+    d_model: 512
     n_layer: 24
     vocab_size: 12
     pad_token_id: 4
@@ -34,7 +34,7 @@ encoder: null
 decoder: null
 
 dataset:
-  context_length: 16384
+  context_length: 8192
   reverse_complement_probability: 0.5
   gene_probability: 0.5
   non_repeat_probability: 0.3
@@ -46,9 +46,7 @@ task:
     _name_: cross_entropy
     ignore_index: 4
   metrics: null
-  torchmetrics:
-    - perplexity
-    - num_tokens
+  torchmetrics: [perplexity, num_tokens]
 
 train:
   seed: 2222
@@ -56,8 +54,7 @@ train:
   mode: min
   test: false
   ckpt: null
-  # Load Phase-I weights, then start a new Phase-II optimizer/scheduler.
-  pretrained_model_path: ???
+  pretrained_model_path: null
   pretrained_model_strict_load: true
   pretrained_model_state_hook:
     _name_: null
@@ -69,12 +66,10 @@ trainer:
   precision: bf16
   max_epochs: null
   max_steps: ???
-  accumulate_grad_batches: 8
+  accumulate_grad_batches: 4
   gradient_clip_val: 0.5
   num_sanity_val_steps: 0
   log_every_n_steps: 20
-  limit_train_batches: 1.0
-  limit_val_batches: 1.0
 
 loader:
   num_workers: 4
@@ -82,7 +77,7 @@ loader:
   drop_last: false
 
 optimizer:
-  lr: 4e-5
+  lr: 8e-5
   weight_decay: 0.01
   betas: [0.9, 0.98]
 
@@ -90,5 +85,5 @@ scheduler:
   t_in_epochs: false
   t_initial: ${trainer.max_steps}
   warmup_t: ???
-  lr_min: 1e-5
+  lr_min: 2e-5
   warmup_lr_init: 1e-6

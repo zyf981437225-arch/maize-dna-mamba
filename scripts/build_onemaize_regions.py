@@ -14,7 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.onemaize import GenomeInput, build_onemaize_index
+from src.onemaize import NAM26_GENOTYPES, GenomeInput, build_onemaize_index
 
 
 def _load_input_manifest(path: Path) -> list[GenomeInput]:
@@ -61,6 +61,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--candidate-stride", type=int, default=16384)
     parser.add_argument("--gene-flank", type=int, default=5000)
     parser.add_argument("--repeat-threshold", type=float, default=0.5)
+    parser.add_argument(
+        "--max-n-fraction",
+        type=float,
+        default=0.1,
+        help="Discard candidate intervals whose assembly-gap fraction exceeds this value",
+    )
+    parser.add_argument(
+        "--skip-fasta-audit",
+        action="store_true",
+        help="Pilot/debug only: skip full A/C/G/T/N and assembly-gap audit",
+    )
     parser.add_argument("--seqid-regex", default=r"^chr(?:[1-9]|10)$")
     parser.add_argument(
         "--val-seqid",
@@ -91,6 +102,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+    if args.formal and args.skip_fasta_audit:
+        raise SystemExit("--formal cannot be combined with --skip-fasta-audit")
     if args.input_manifest is not None:
         inputs = _load_input_manifest(args.input_manifest.expanduser().resolve())
     else:
@@ -125,6 +138,8 @@ def main() -> None:
         candidate_stride=args.candidate_stride,
         gene_flank=args.gene_flank,
         repeat_threshold=args.repeat_threshold,
+        max_n_fraction=args.max_n_fraction,
+        audit_fasta=not args.skip_fasta_audit,
         seqid_regex=args.seqid_regex,
         val_seqids=args.val_seqid,
         test_seqids=args.test_seqid,
@@ -136,6 +151,8 @@ def main() -> None:
         expected_split_counts={"train": 23, "val": 1, "test": 2}
         if args.formal
         else None,
+        expected_genotypes=NAM26_GENOTYPES if args.formal else None,
+        required_train_genotypes=("B73",) if args.formal else (),
         overwrite=args.overwrite,
     )
     print(json.dumps(manifest, indent=2, sort_keys=True))

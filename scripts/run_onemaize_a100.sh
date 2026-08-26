@@ -3,9 +3,9 @@ set -euo pipefail
 
 STAGE="${1:-smoke}"
 case "$STAGE" in
-  validate|smoke|8k|16k) ;;
+  validate|benchmark|smoke|pilot|8k|16k) ;;
   *)
-    echo "Usage: bash scripts/run_onemaize_a100.sh [validate|smoke|8k|16k]" >&2
+    echo "Usage: bash scripts/run_onemaize_a100.sh [validate|benchmark|smoke|pilot|8k|16k]" >&2
     exit 2
     ;;
 esac
@@ -18,6 +18,9 @@ NUM_WORKERS="${NUM_WORKERS:-4}"
 MAX_STEPS="${MAX_STEPS:-}"
 WARMUP_STEPS="${WARMUP_STEPS:-}"
 PHASE1_CKPT="${PHASE1_CKPT:-}"
+BENCHMARK_WARMUP="${BENCHMARK_WARMUP:-2}"
+BENCHMARK_STEPS="${BENCHMARK_STEPS:-5}"
+BENCHMARK_IO_STEPS="${BENCHMARK_IO_STEPS:-32}"
 
 if [[ ! -f "$ONEMAIZE_DATA_DIR/manifest.json" ]]; then
   echo "Missing OneMaize manifest: $ONEMAIZE_DATA_DIR/manifest.json" >&2
@@ -79,9 +82,35 @@ if [[ "$STAGE" == "smoke" ]]; then
   exit 0
 fi
 
+if [[ "$STAGE" == "benchmark" ]]; then
+  python scripts/check_onemaize_model_budget.py
+  python scripts/benchmark_onemaize.py \
+    --data-dir "$ONEMAIZE_DATA_DIR" \
+    --context-length 8192 \
+    --d-model 864 \
+    --n-layer 24 \
+    --precision bf16 \
+    --warmup-steps "$BENCHMARK_WARMUP" \
+    --steps "$BENCHMARK_STEPS" \
+    --io-steps "$BENCHMARK_IO_STEPS" \
+    --num-workers "$NUM_WORKERS" \
+    --output-json "$RUN_ROOT/$STAGE/phase0.json" \
+    "${fasta_args[@]}"
+  exit 0
+fi
+
 if [[ -z "$MAX_STEPS" || -z "$WARMUP_STEPS" ]]; then
   echo "Set MAX_STEPS and WARMUP_STEPS after the smoke/benchmark is accepted." >&2
   exit 2
+fi
+
+if [[ "$STAGE" == "pilot" ]]; then
+  python -m train \
+    experiment=onemaize_b73_pilot_8k \
+    trainer.max_steps="$MAX_STEPS" \
+    scheduler.warmup_t="$WARMUP_STEPS" \
+    "${common_args[@]}"
+  exit 0
 fi
 
 if [[ "$STAGE" == "8k" ]]; then

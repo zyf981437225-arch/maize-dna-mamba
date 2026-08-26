@@ -1,5 +1,39 @@
 # Changelog
 
+## OneMaize acceptance hardening
+
+- `src/onemaize/regions.py`: added exact NAM26/B73 formal guards, streaming
+  Parquet writes, full FASTA A/C/G/T/N audit, assembly-gap coverage, and a 10%
+  N candidate filter. RNA training: no. Checkpoint compatibility: no effect.
+- `src/dataloaders/datasets/onemaize_dataset.py` and
+  `src/dataloaders/onemaize_mlm.py`: added Arrow-backed scalable metadata and
+  within-pool high-N crop retries that preserve hierarchical sampling. RNA
+  training: no. Checkpoint compatibility: no effect.
+- `configs/experiment/onemaize_b73_{8k,16k}.yaml`: changed the preserved
+  backbone width from 768 to 864 so 24 blocks meet the approximately 120M plan
+  target. RNA training: no. Checkpoint compatibility: these production configs
+  define a new 864-width checkpoint class.
+- `configs/experiment/onemaize_b73_pilot_8k.yaml`: added the requested small
+  approximately 44M ablation. RNA training: no. Checkpoint compatibility: new
+  isolated pilot class.
+- `src/onemaize/model_budget.py` and
+  `scripts/check_onemaize_model_budget.py`: added a hard analytic parameter
+  budget gate. RNA training: no. Checkpoint compatibility: no effect.
+- `scripts/benchmark_onemaize.py` and `scripts/run_onemaize_a100.sh`: added the
+  Phase-0 data-I/O/model-cost comparison and guarded pilot stage. RNA training:
+  no. Checkpoint compatibility: no effect.
+- `scripts/validate_onemaize_data.py`: strengthened formal panel, FASTA audit,
+  indexed access, class distribution, and masked-fraction validation. RNA
+  training: no. Checkpoint compatibility: no effect.
+- `tests/test_onemaize_pipeline.py`: added exact-panel, B73 split, parameter
+  budget, N-filter, and runtime retry tests. RNA training: no. Checkpoint
+  compatibility: no effect.
+- `src/models/sequence/checkpoint_hooks.py` and `src/utils/registry.py`: moved
+  pure state-dict mapping hooks behind a lightweight import boundary so
+  checkpoint tests and CPU tooling do not require CUDA Mamba at import time.
+  RNA training: behavior unchanged. Checkpoint compatibility: format and
+  mapping semantics unchanged.
+
 ## OneMaize teacher-plan pipeline
 
 - Added annotation-aware `regions.parquet` construction from per-genotype

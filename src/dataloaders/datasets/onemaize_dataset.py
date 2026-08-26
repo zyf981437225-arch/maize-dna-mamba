@@ -178,10 +178,31 @@ class _FastaStore:
         return state
 
 
+class _ArrowRegionRows:
+    """Mapping-like row access without materializing millions of Python dicts."""
+
+    def __init__(self, table, columns: list[str]) -> None:
+        self.table = table
+        self.columns = tuple(columns)
+
+    def __len__(self) -> int:
+        return len(self.table)
+
+    def __getitem__(self, index: int) -> dict:
+        index = int(index)
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError(index)
+        return {
+            name: self.table.column(name)[index].as_py() for name in self.columns
+        }
+
+
 class OneMaizeRegionMLMDataset(torch.utils.data.Dataset):
     """Hierarchically sample genotype, region class, interval, and dynamic crop."""
 
-    SUPPORTED_SCHEMA_VERSIONS = {2}
+    SUPPORTED_SCHEMA_VERSIONS = {3}
 
     def __init__(
         self,
@@ -199,6 +220,8 @@ class OneMaizeRegionMLMDataset(torch.utils.data.Dataset):
         seed: int = 2357,
         allow_index_build: bool = False,
         fasta_root: Optional[str] = None,
+        max_n_fraction: Optional[float] = None,
+        max_crop_attempts: int = 16,
     ) -> None:
         self.data_dir = Path(data_dir).expanduser().resolve()
         self.split = str(split).lower()
@@ -249,8 +272,21 @@ class OneMaizeRegionMLMDataset(torch.utils.data.Dataset):
                 f"context_length must be one of {sorted(allowed_contexts)}, got "
                 f"{self.context_length}"
             )
+        manifest_n_fraction = float(self.manifest.get("max_n_fraction", 1.0))
+        self.max_n_fraction = (
+            manifest_n_fraction
+            if max_n_fraction is None
+            else float(max_n_fraction)
+        )
+        self.max_crop_attempts = int(max_crop_attempts)
+        if not 0.0 <= self.max_n_fraction <= 1.0:
+            raise ValueError("max_n_fraction must be in [0, 1]")
+        if self.max_crop_attempts <= 0:
+            raise ValueError("max_crop_attempts must be positive")
 
         try:
+            import pyarrow as pa
+            import pyarrow.compute as pc
             import pyarrow.parquet as pq
         except ImportError as exc:
             raise RuntimeError("Reading OneMaize metadata requires pyarrow") from exc
@@ -276,28 +312,41 @@ class OneMaizeRegionMLMDataset(torch.utils.data.Dataset):
             "end",
             "region_class",
             "repeat_fraction",
+            "n_fraction",
             "gene_id",
         ]
         table = pq.read_table(
             self.data_dir / self.manifest["files"]["regions"],
             columns=region_columns,
+            filters=[("split", "=", self.split)],
         )
-        all_rows = table.to_pylist()
-        self.rows = [row for row in all_rows if row["split"] == self.split]
+        self.rows = _ArrowRegionRows(table, region_columns)
         if not self.rows:
             raise ValueError(f"OneMaize split {self.split!r} has no candidate regions")
-        grouped: dict[tuple[str, str], list[int]] = {}
-        for index, row in enumerate(self.rows):
-            if int(row["end"]) - int(row["start"]) < self.context_length:
-                raise ValueError(
-                    f"Candidate {row['region_id']} is shorter than context_length"
-                )
-            key = (row["genotype"], row["region_class"])
-            grouped.setdefault(key, []).append(index)
-        self.grouped_indices = {
-            key: np.asarray(indices, dtype=np.int64) for key, indices in grouped.items()
-        }
-        self.genotypes = sorted({row["genotype"] for row in self.rows})
+        lengths = pc.subtract(table["end"], table["start"])
+        minimum_length = int(pc.min(lengths).as_py())
+        if minimum_length < self.context_length:
+            raise ValueError(
+                f"Shortest candidate is {minimum_length} bp, below context_length"
+            )
+
+        genotype_values = table["genotype"].combine_chunks()
+        class_values = table["region_class"].combine_chunks()
+        self.genotypes = sorted(pc.unique(genotype_values).to_pylist())
+        genotype_codes = pc.index_in(
+            genotype_values, value_set=pa.array(self.genotypes)
+        ).to_numpy(zero_copy_only=False)
+        class_codes = pc.index_in(
+            class_values, value_set=pa.array(REGION_CLASSES)
+        ).to_numpy(zero_copy_only=False)
+        self.grouped_indices = {}
+        for genotype_index, genotype in enumerate(self.genotypes):
+            for class_index, region_class in enumerate(REGION_CLASSES):
+                indices = np.flatnonzero(
+                    (genotype_codes == genotype_index) & (class_codes == class_index)
+                ).astype(np.int64, copy=False)
+                if indices.size:
+                    self.grouped_indices[(genotype, region_class)] = indices
         missing = [
             f"{genotype}/{region_class}"
             for genotype in self.genotypes
@@ -322,7 +371,10 @@ class OneMaizeRegionMLMDataset(torch.utils.data.Dataset):
         for base in "ACGTN":
             self._byte_to_token[ord(base)] = int(vocab[base])
         self.source_counts = {
-            region_class: sum(row["region_class"] == region_class for row in self.rows)
+            region_class: sum(
+                len(self.grouped_indices[(genotype, region_class)])
+                for genotype in self.genotypes
+            )
             for region_class in REGION_CLASSES
         }
         self.nucleotides = self.samples_per_epoch * self.context_length
@@ -340,13 +392,24 @@ class OneMaizeRegionMLMDataset(torch.utils.data.Dataset):
             self._random_rng = np.random.default_rng(worker_seed + self.seed)
         return self._random_rng
 
-    def _sample_region(self, rng: np.random.Generator) -> dict:
+    def _sample_pool(self, rng: np.random.Generator) -> tuple[str, str]:
         genotype = self.genotypes[int(rng.integers(0, len(self.genotypes)))]
         class_index = int(rng.choice(len(REGION_CLASSES), p=self.region_probabilities))
         region_class = REGION_CLASSES[class_index]
+        return genotype, region_class
+
+    def _sample_region_from_pool(
+        self,
+        rng: np.random.Generator,
+        genotype: str,
+        region_class: str,
+    ) -> dict:
         pool = self.grouped_indices[(genotype, region_class)]
         row_index = int(pool[int(rng.integers(0, len(pool)))])
         return self.rows[row_index]
+
+    def _sample_region(self, rng: np.random.Generator) -> dict:
+        return self._sample_region_from_pool(rng, *self._sample_pool(rng))
 
     def sample_metadata(self, index: int) -> dict:
         """Return the sampled region/crop metadata without reading sequence data."""
@@ -389,19 +452,38 @@ class OneMaizeRegionMLMDataset(torch.utils.data.Dataset):
         if index < 0 or index >= len(self):
             raise IndexError(index)
         rng = self._rng_for_index(index)
-        row = self._sample_region(rng)
-        max_start = int(row["end"]) - self.context_length
-        crop_start = int(rng.integers(int(row["start"]), max_start + 1))
-        crop_end = crop_start + self.context_length
-        sequence = self._fasta_store.fetch(
-            row["genotype"], row["seqid"], crop_start, crop_end
-        )
-        if len(sequence) != self.context_length:
-            raise ValueError(
-                f"Expected {self.context_length} bp, fetched {len(sequence)} for "
+        genotype, region_class = self._sample_pool(rng)
+        sequence = None
+        last_location = None
+        for _ in range(self.max_crop_attempts):
+            row = self._sample_region_from_pool(rng, genotype, region_class)
+            max_start = int(row["end"]) - self.context_length
+            crop_start = int(rng.integers(int(row["start"]), max_start + 1))
+            crop_end = crop_start + self.context_length
+            candidate = self._fasta_store.fetch(
+                row["genotype"], row["seqid"], crop_start, crop_end
+            )
+            last_location = (
                 f"{row['genotype']}/{row['seqid']}:{crop_start}-{crop_end}"
             )
-        sequence = "".join(base if base in "ACGTN" else "N" for base in sequence)
+            if len(candidate) != self.context_length:
+                raise ValueError(
+                    f"Expected {self.context_length} bp, fetched {len(candidate)} "
+                    f"for {last_location}"
+                )
+            candidate = candidate.upper()
+            if set(candidate) - set("ACGTN"):
+                raise ValueError(f"Non-ACGTN sequence fetched for {last_location}")
+            if candidate.count("N") / self.context_length <= self.max_n_fraction:
+                sequence = candidate
+                break
+            self.filtered_windows += 1
+        if sequence is None:
+            raise ValueError(
+                f"Could not sample a crop with N fraction <= {self.max_n_fraction:.3f} "
+                f"after {self.max_crop_attempts} attempts from "
+                f"{genotype}/{region_class}; last={last_location}"
+            )
         if rng.random() < self.reverse_complement_probability:
             sequence = reverse_complement(sequence)
         raw = np.frombuffer(sequence.encode("ascii"), dtype=np.uint8)

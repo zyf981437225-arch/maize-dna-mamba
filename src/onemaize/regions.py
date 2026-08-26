@@ -20,6 +20,35 @@ from typing import Iterable, Iterator, Optional
 
 
 REGION_CLASSES = ("gene_centered", "non_repeat", "te_rich")
+DNA_ALPHABET = frozenset("ACGTN")
+NAM26_GENOTYPES = (
+    "B73",
+    "B97",
+    "CML103",
+    "CML228",
+    "CML247",
+    "CML277",
+    "CML322",
+    "CML333",
+    "CML52",
+    "CML69",
+    "Hp301",
+    "Il14H",
+    "Ki3",
+    "Ki11",
+    "Ky21",
+    "M162W",
+    "M37W",
+    "Mo18W",
+    "MS71",
+    "NC350",
+    "NC358",
+    "Oh43",
+    "Oh7B",
+    "P39",
+    "Tx303",
+    "Tzi8",
+)
 
 
 @dataclass(frozen=True)
@@ -86,6 +115,72 @@ def read_fasta_lengths(path: Path) -> dict[str, int]:
     if not lengths:
         raise ValueError(f"No FASTA records found in {path}")
     return lengths
+
+
+def read_fasta_n_coverage(
+    path: Path,
+    lengths: dict[str, int],
+    included: set[str],
+) -> tuple[dict[str, "IntervalCoverage"], Counter]:
+    """Stream FASTA once, validate A/C/G/T/N, and index assembly-gap runs."""
+
+    intervals: dict[str, list[tuple[int, int]]] = defaultdict(list)
+    counts: Counter = Counter()
+    current = None
+    current_position = 0
+    seen: set[str] = set()
+
+    def finish_record() -> None:
+        if current in included and current_position != lengths[current]:
+            raise ValueError(
+                f"FASTA/FAI length mismatch for {current}: "
+                f"streamed={current_position}, indexed={lengths[current]}"
+            )
+
+    with _open_text(path) as handle:
+        for line_number, raw in enumerate(handle, start=1):
+            if raw.startswith(">"):
+                finish_record()
+                current = raw[1:].split(maxsplit=1)[0]
+                if not current:
+                    raise ValueError(f"Empty FASTA identifier at {path}:{line_number}")
+                current_position = 0
+                if current in included:
+                    seen.add(current)
+                continue
+            sequence = "".join(raw.split()).upper()
+            if not sequence:
+                continue
+            if current is None:
+                raise ValueError(f"Sequence before FASTA header at {path}:{line_number}")
+            invalid = set(sequence) - DNA_ALPHABET
+            if invalid:
+                raise ValueError(
+                    f"Non-ACGTN FASTA symbols at {path}:{line_number}: "
+                    f"{sorted(invalid)}"
+                )
+            if current in included:
+                for base in "ACGTN":
+                    counts[base] += sequence.count(base)
+                for match in re.finditer("N+", sequence):
+                    intervals[current].append(
+                        (
+                            current_position + match.start(),
+                            current_position + match.end(),
+                        )
+                    )
+                current_position += len(sequence)
+    finish_record()
+    missing = included - seen
+    if missing:
+        raise ValueError(f"Included FASTA seqids were not streamed: {sorted(missing)}")
+    return (
+        {
+            seqid: IntervalCoverage(intervals.get(seqid, []))
+            for seqid in included
+        },
+        counts,
+    )
 
 
 def parse_gff3_attributes(raw: str) -> dict[str, str]:
@@ -274,6 +369,53 @@ def _write_parquet(path: Path, rows: list[dict]) -> None:
     pq.write_table(table, path, compression="zstd")
 
 
+def _region_schema():
+    try:
+        import pyarrow as pa
+    except ImportError as exc:
+        raise RuntimeError("Building OneMaize metadata requires pyarrow") from exc
+    return pa.schema(
+        [
+            ("region_id", pa.string()),
+            ("genotype", pa.string()),
+            ("split", pa.string()),
+            ("seqid", pa.string()),
+            ("start", pa.int64()),
+            ("end", pa.int64()),
+            ("region_class", pa.string()),
+            ("repeat_fraction", pa.float64()),
+            ("n_fraction", pa.float64()),
+            ("gene_id", pa.string()),
+            ("gene_start", pa.int64()),
+            ("gene_end", pa.int64()),
+            ("strand", pa.string()),
+        ]
+    )
+
+
+def _open_region_writer(path: Path):
+    try:
+        import pyarrow.parquet as pq
+    except ImportError as exc:
+        raise RuntimeError("Building OneMaize metadata requires pyarrow") from exc
+    return pq.ParquetWriter(
+        path,
+        _region_schema(),
+        compression="zstd",
+        use_dictionary=["genotype", "split", "seqid", "region_class", "strand"],
+    )
+
+
+def _write_region_batch(writer, rows: list[dict]) -> None:
+    if not rows:
+        return
+    try:
+        import pyarrow as pa
+    except ImportError as exc:
+        raise RuntimeError("Building OneMaize metadata requires pyarrow") from exc
+    writer.write_table(pa.Table.from_pylist(rows, schema=_region_schema()))
+
+
 def _write_stats(path: Path, manifest: dict) -> None:
     lines = [
         "# OneMaize candidate-region statistics",
@@ -287,12 +429,16 @@ def _write_stats(path: Path, manifest: dict) -> None:
         )
         + " (train/val/test)",
         f"- Formal 26-genotype split validated: {manifest['formal_split_validated']}",
+        "- Expected NAM26 panel validated: "
+        f"{manifest['expected_genotype_panel_validated']}",
         f"- Candidate regions: {manifest['region_count']:,}",
         f"- Primary context: {manifest['primary_context']:,} bp",
         f"- Extended context: {manifest['extended_context']:,} bp",
         f"- Genome-wide candidate span: {manifest['candidate_span']:,} bp",
         f"- Genome-wide stride: {manifest['candidate_stride']:,} bp",
         f"- TE-rich threshold: {manifest['repeat_threshold']:.3f}",
+        f"- Maximum candidate N fraction: {manifest['max_n_fraction']:.3f}",
+        f"- FASTA alphabet audited: {manifest['fasta_alphabet_audited']}",
         "",
         "## Region counts",
         "",
@@ -320,6 +466,8 @@ def build_onemaize_index(
     candidate_stride: int = 16384,
     gene_flank: int = 5000,
     repeat_threshold: float = 0.5,
+    max_n_fraction: float = 0.1,
+    audit_fasta: bool = True,
     seqid_regex: str = r"^chr(?:[1-9]|10)$",
     val_seqids: Iterable[str] = (),
     test_seqids: Iterable[str] = (),
@@ -327,6 +475,8 @@ def build_onemaize_index(
     require_all_classes: bool = True,
     expected_genotype_count: Optional[int] = None,
     expected_split_counts: Optional[dict[str, int]] = None,
+    expected_genotypes: Optional[Iterable[str]] = None,
+    required_train_genotypes: Iterable[str] = (),
     overwrite: bool = False,
 ) -> dict:
     """Build ``genomes.parquet`` and ``regions.parquet`` for dynamic sampling."""
@@ -337,6 +487,9 @@ def build_onemaize_index(
     genotypes = [item.genotype for item in records]
     if any(not item for item in genotypes) or len(set(genotypes)) != len(genotypes):
         raise ValueError("Genotype names must be non-empty and unique")
+    casefolded_genotypes = [item.casefold() for item in genotypes]
+    if len(set(casefolded_genotypes)) != len(casefolded_genotypes):
+        raise ValueError("Genotype names must also be unique ignoring case")
     genotype_split_counts = Counter(item.split for item in records)
     if expected_genotype_count is not None and len(records) != expected_genotype_count:
         raise ValueError(
@@ -355,6 +508,35 @@ def build_onemaize_index(
             raise ValueError(
                 f"Expected genotype split counts {normalized_expected}, found {observed}"
             )
+    if expected_genotypes is not None:
+        expected_by_key = {
+            str(genotype).casefold(): str(genotype) for genotype in expected_genotypes
+        }
+        observed_by_key = {genotype.casefold(): genotype for genotype in genotypes}
+        if set(observed_by_key) != set(expected_by_key):
+            missing = sorted(
+                expected_by_key[key]
+                for key in set(expected_by_key) - set(observed_by_key)
+            )
+            unexpected = sorted(
+                observed_by_key[key]
+                for key in set(observed_by_key) - set(expected_by_key)
+            )
+            raise ValueError(
+                f"Genotype panel mismatch; missing={missing}, unexpected={unexpected}"
+            )
+    required_train_genotypes = tuple(str(item) for item in required_train_genotypes)
+    split_by_key = {item.genotype.casefold(): item.split for item in records}
+    misplaced = [
+        genotype
+        for genotype in required_train_genotypes
+        if split_by_key.get(genotype.casefold()) != "train"
+    ]
+    if misplaced:
+        raise ValueError(
+            "Required training genotypes are absent or assigned to another split: "
+            + ", ".join(misplaced)
+        )
     for record in records:
         for path in (record.fasta, record.genes_gff3, record.te_gff3):
             if not path.is_file():
@@ -365,6 +547,8 @@ def build_onemaize_index(
         raise ValueError("candidate_span must cover extended_context and stride must be positive")
     if not 0.0 <= repeat_threshold <= 1.0:
         raise ValueError("repeat_threshold must be in [0, 1]")
+    if not 0.0 <= max_n_fraction <= 1.0:
+        raise ValueError("max_n_fraction must be in [0, 1]")
     val_set, test_set = set(val_seqids), set(test_seqids)
     if expected_split_counts is not None and (val_set or test_set):
         raise ValueError(
@@ -382,11 +566,15 @@ def build_onemaize_index(
     build_dir = output_dir.parent / f".{output_dir.name}.building-{uuid.uuid4().hex}"
     build_dir.mkdir()
 
-    regions: list[dict] = []
     genomes: list[dict] = []
+    region_count = 0
     counts: dict[str, dict[str, Counter]] = defaultdict(lambda: defaultdict(Counter))
+    represented_pairs: set[tuple[str, str]] = set()
+    region_writer = None
     try:
+        region_writer = _open_region_writer(build_dir / "regions.parquet")
         for record in records:
+            record_regions: list[dict] = []
             lengths = read_fasta_lengths(record.fasta)
             included = {seqid for seqid in lengths if seqid_pattern.search(seqid)}
             if not included:
@@ -395,6 +583,15 @@ def build_onemaize_index(
                 )
             te_coverage = _read_te_coverage(record.te_gff3, lengths, included)
             genes = _read_protein_coding_genes(record.genes_gff3, lengths, included)
+            if audit_fasta:
+                n_coverage, base_counts = read_fasta_n_coverage(
+                    record.fasta, lengths, included
+                )
+            else:
+                n_coverage = {
+                    seqid: IntervalCoverage(()) for seqid in included
+                }
+                base_counts = Counter()
             gene_body_coverage = {
                 seqid: IntervalCoverage(
                     (gene["start"], gene["end"]) for gene in genes.get(seqid, [])
@@ -405,6 +602,7 @@ def build_onemaize_index(
             for seqid in sorted(included):
                 sequence_length = lengths[seqid]
                 split = _split_for_seqid(record.split, seqid, val_set, test_set)
+                represented_pairs.add((split, record.genotype))
                 coverage = te_coverage[seqid]
                 for gene in genes.get(seqid, []):
                     start = max(0, gene["start"] - gene_flank)
@@ -413,7 +611,10 @@ def build_onemaize_index(
                         start, end, extended_context, sequence_length
                     )
                     repeat_fraction = coverage.covered_bp(start, end) / (end - start)
-                    regions.append(
+                    n_fraction = n_coverage[seqid].covered_bp(start, end) / (end - start)
+                    if n_fraction > max_n_fraction:
+                        continue
+                    record_regions.append(
                         {
                             "region_id": f"{record.genotype}:gene:{gene['gene_id']}",
                             "genotype": record.genotype,
@@ -423,6 +624,7 @@ def build_onemaize_index(
                             "end": end,
                             "region_class": "gene_centered",
                             "repeat_fraction": float(repeat_fraction),
+                            "n_fraction": float(n_fraction),
                             "gene_id": gene["gene_id"],
                             "gene_start": gene["start"],
                             "gene_end": gene["end"],
@@ -436,6 +638,9 @@ def build_onemaize_index(
                 ):
                     end = start + candidate_span
                     repeat_fraction = coverage.covered_bp(start, end) / candidate_span
+                    n_fraction = n_coverage[seqid].covered_bp(start, end) / candidate_span
+                    if n_fraction > max_n_fraction:
+                        continue
                     region_class = (
                         "te_rich" if repeat_fraction >= repeat_threshold else "non_repeat"
                     )
@@ -445,7 +650,7 @@ def build_onemaize_index(
                         and gene_body_coverage[seqid].overlaps(start, end)
                     ):
                         continue
-                    regions.append(
+                    record_regions.append(
                         {
                             "region_id": (
                                 f"{record.genotype}:{seqid}:{start}:{end}:{region_class}"
@@ -457,6 +662,7 @@ def build_onemaize_index(
                             "end": end,
                             "region_class": region_class,
                             "repeat_fraction": float(repeat_fraction),
+                            "n_fraction": float(n_fraction),
                             "gene_id": None,
                             "gene_start": None,
                             "gene_end": None,
@@ -465,6 +671,8 @@ def build_onemaize_index(
                     )
                     counts[split][record.genotype][region_class] += 1
 
+            _write_region_batch(region_writer, record_regions)
+            region_count += len(record_regions)
             genomes.append(
                 {
                     "genotype": record.genotype,
@@ -488,6 +696,14 @@ def build_onemaize_index(
                         len(genes.get(seqid, [])) for seqid in included
                     ),
                     "repeat_union_bp": sum(te_coverage[seqid].total for seqid in included),
+                    "base_counts": {
+                        base: int(base_counts.get(base, 0)) for base in "ACGTN"
+                    },
+                    "n_fraction": (
+                        0.0
+                        if not base_counts
+                        else int(base_counts.get("N", 0)) / sum(base_counts.values())
+                    ),
                     "included_seqids": sorted(included),
                 }
             )
@@ -501,21 +717,22 @@ def build_onemaize_index(
         }
         if require_all_classes:
             missing = []
-            for split, genotype_counts in plain_counts.items():
-                for genotype, class_counts in genotype_counts.items():
-                    for region_class in REGION_CLASSES:
-                        if class_counts.get(region_class, 0) == 0:
-                            missing.append(f"{split}/{genotype}/{region_class}")
+            for split, genotype in sorted(represented_pairs):
+                class_counts = plain_counts.get(split, {}).get(genotype, {})
+                for region_class in REGION_CLASSES:
+                    if class_counts.get(region_class, 0) == 0:
+                        missing.append(f"{split}/{genotype}/{region_class}")
             if missing:
                 raise ValueError(
                     "Every represented split/genotype requires all region classes; missing: "
                     + ", ".join(missing)
                 )
 
+        region_writer.close()
+        region_writer = None
         _write_parquet(build_dir / "genomes.parquet", genomes)
-        _write_parquet(build_dir / "regions.parquet", regions)
         manifest = {
-            "schema_version": 2,
+            "schema_version": 3,
             "coordinate_system": "0-based-half-open",
             "alphabet": "ACGTN",
             "genotype_count": len(genomes),
@@ -524,7 +741,9 @@ def build_onemaize_index(
                 for split in ("train", "val", "test")
             },
             "formal_split_validated": expected_split_counts is not None,
-            "region_count": len(regions),
+            "expected_genotype_panel_validated": expected_genotypes is not None,
+            "required_train_genotypes": sorted(required_train_genotypes),
+            "region_count": region_count,
             "region_classes": list(REGION_CLASSES),
             "primary_context": int(primary_context),
             "extended_context": int(extended_context),
@@ -532,6 +751,8 @@ def build_onemaize_index(
             "candidate_stride": int(candidate_stride),
             "gene_flank": int(gene_flank),
             "repeat_threshold": float(repeat_threshold),
+            "max_n_fraction": float(max_n_fraction),
+            "fasta_alphabet_audited": bool(audit_fasta),
             "seqid_regex": seqid_regex,
             "exclude_gene_bodies_from_non_repeat": bool(
                 exclude_gene_bodies_from_non_repeat
@@ -553,5 +774,7 @@ def build_onemaize_index(
         os.replace(build_dir, output_dir)
         return manifest
     except Exception:
+        if region_writer is not None:
+            region_writer.close()
         shutil.rmtree(build_dir, ignore_errors=True)
         raise

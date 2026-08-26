@@ -11,7 +11,8 @@ from src.dataloaders.datasets.onemaize_dataset import (
     reverse_complement,
 )
 from src.dataloaders.onemaize_mlm import OneMaizeDNAMLM
-from src.onemaize.regions import GenomeInput, build_onemaize_index
+from src.onemaize.regions import NAM26_GENOTYPES, GenomeInput, build_onemaize_index
+from src.onemaize.model_budget import estimate_caduceus_parameters
 
 
 class _Tokenizer:
@@ -84,6 +85,8 @@ def _write_fixture(tmp_path: Path):
 def test_region_builder_writes_teacher_plan_pools(tmp_path):
     _, output, manifest = _write_fixture(tmp_path)
     assert manifest["coordinate_system"] == "0-based-half-open"
+    assert manifest["schema_version"] == 3
+    assert manifest["fasta_alphabet_audited"] is True
     assert manifest["primary_context"] == 64
     assert manifest["extended_context"] == 128
     for split in ("train", "val", "test"):
@@ -97,6 +100,89 @@ def test_region_builder_writes_teacher_plan_pools(tmp_path):
     assert len(gene_rows) == 3
     assert all(row["end"] - row["start"] >= 128 for row in gene_rows)
     assert {row["split"] for row in rows} == {"train", "val", "test"}
+    assert all(row["n_fraction"] == 0.0 for row in rows)
+
+
+def test_builder_rejects_assembly_gap_heavy_candidates(tmp_path):
+    fasta = tmp_path / "B73.fa"
+    genes = tmp_path / "B73.genes.gff3"
+    te = tmp_path / "B73.TE.gff3"
+    sequence = "N" * 128 + ("ACGT" * 160)
+    fasta.write_text(f">chr1\n{sequence}\n", encoding="ascii")
+    genes.write_text(
+        "##gff-version 3\n"
+        "chr1\tNAM\tgene\t321\t352\t.\t+\t.\tID=gene1;biotype=protein_coding\n",
+        encoding="utf-8",
+    )
+    te.write_text(
+        "##gff-version 3\n"
+        "chr1\tEDTA\trepeat_region\t513\t768\t.\t+\t.\tID=te1\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "metadata-n"
+    manifest = build_onemaize_index(
+        [GenomeInput("B73", fasta, genes, te)],
+        output,
+        primary_context=64,
+        extended_context=128,
+        candidate_span=128,
+        candidate_stride=64,
+        gene_flank=16,
+        max_n_fraction=0.1,
+        seqid_regex=r"^chr1$",
+        require_all_classes=False,
+    )
+    rows = pq.read_table(output / "regions.parquet").to_pylist()
+    assert manifest["max_n_fraction"] == 0.1
+    assert rows
+    assert all(row["n_fraction"] <= 0.1 for row in rows)
+    assert not any(row["start"] == 0 for row in rows)
+
+
+def test_runtime_resamples_n_heavy_crop_inside_selected_pool(tmp_path):
+    fasta = tmp_path / "B73.fa"
+    genes = tmp_path / "B73.genes.gff3"
+    te = tmp_path / "B73.TE.gff3"
+    sequence = "N" * 128 + ("ACGT" * 224)
+    fasta.write_text(f">chr1\n{sequence}\n", encoding="ascii")
+    genes.write_text(
+        "##gff-version 3\n"
+        "chr1\tNAM\tgene\t321\t352\t.\t+\t.\tID=gene1;biotype=protein_coding\n",
+        encoding="utf-8",
+    )
+    te.write_text(
+        "##gff-version 3\n"
+        "chr1\tEDTA\trepeat_region\t769\t1024\t.\t+\t.\tID=te1\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "metadata-runtime-n"
+    build_onemaize_index(
+        [GenomeInput("B73", fasta, genes, te)],
+        output,
+        primary_context=64,
+        extended_context=128,
+        candidate_span=128,
+        candidate_stride=64,
+        gene_flank=16,
+        max_n_fraction=1.0,
+        seqid_regex=r"^chr1$",
+        require_all_classes=True,
+    )
+    dataset = OneMaizeRegionMLMDataset(
+        output,
+        tokenizer=_Tokenizer(),
+        split="train",
+        context_length=64,
+        samples_per_epoch=256,
+        deterministic=True,
+        allow_index_build=True,
+        max_n_fraction=0.1,
+        max_crop_attempts=64,
+    )
+    for index in range(len(dataset)):
+        input_ids, labels = dataset[index]
+        assert input_ids.shape == labels.shape == (64,)
+    assert dataset.filtered_windows > 0
 
 
 def test_dynamic_dataset_samples_50_30_20_and_masks(tmp_path):
@@ -163,6 +249,68 @@ def test_formal_mode_rejects_single_genotype_pilot(tmp_path):
         )
 
 
+def test_formal_mode_requires_exact_panel_and_b73_in_train(tmp_path):
+    fasta, output, _ = _write_fixture(tmp_path)
+    records = []
+    for index, genotype in enumerate(NAM26_GENOTYPES):
+        split = "val" if genotype == "B73" else "test" if index in (1, 2) else "train"
+        records.append(
+            GenomeInput(
+                genotype,
+                fasta,
+                tmp_path / "B73.genes.gff3",
+                tmp_path / "B73.TE.gff3",
+                split=split,
+            )
+        )
+    with pytest.raises(ValueError, match="Required training genotypes"):
+        build_onemaize_index(
+            records,
+            output.parent / "formal-b73-held-out",
+            primary_context=64,
+            extended_context=128,
+            candidate_span=128,
+            candidate_stride=64,
+            expected_genotype_count=26,
+            expected_split_counts={"train": 23, "val": 1, "test": 2},
+            expected_genotypes=NAM26_GENOTYPES,
+            required_train_genotypes=("B73",),
+        )
+
+
+def test_formal_nam26_panel_builds_with_23_1_2_split(tmp_path):
+    fasta, output, _ = _write_fixture(tmp_path)
+    records = []
+    for index, genotype in enumerate(NAM26_GENOTYPES):
+        split = "train" if index < 23 else "val" if index == 23 else "test"
+        records.append(
+            GenomeInput(
+                genotype,
+                fasta,
+                tmp_path / "B73.genes.gff3",
+                tmp_path / "B73.TE.gff3",
+                split=split,
+            )
+        )
+    manifest = build_onemaize_index(
+        records,
+        output.parent / "formal-nam26",
+        primary_context=64,
+        extended_context=128,
+        candidate_span=128,
+        candidate_stride=64,
+        seqid_regex=r"^chr[123]$",
+        expected_genotype_count=26,
+        expected_split_counts={"train": 23, "val": 1, "test": 2},
+        expected_genotypes=NAM26_GENOTYPES,
+        required_train_genotypes=("B73",),
+    )
+    assert manifest["formal_split_validated"] is True
+    assert manifest["expected_genotype_panel_validated"] is True
+    assert manifest["genotype_split_counts"] == {"train": 23, "val": 1, "test": 2}
+    assert manifest["region_count"] > 26
+
+
 def test_data_module_declares_same_position_mlm(tmp_path):
     _, output, _ = _write_fixture(tmp_path)
     module = OneMaizeDNAMLM(
@@ -175,3 +323,12 @@ def test_data_module_declares_same_position_mlm(tmp_path):
         allow_index_build=True,
     )
     assert module.mlm is True
+
+
+def test_teacher_plan_model_budgets():
+    base = estimate_caduceus_parameters(d_model=864, n_layer=24)
+    pilot = estimate_caduceus_parameters(d_model=512, n_layer=24)
+    legacy_width = estimate_caduceus_parameters(d_model=768, n_layer=24)
+    assert 110_000_000 <= base["total"] <= 130_000_000
+    assert 30_000_000 <= pilot["total"] <= 50_000_000
+    assert legacy_width["total"] < 100_000_000
