@@ -187,10 +187,18 @@ class LMTask(BaseTask):
 
         x, w = encoder(x, **z)
 
+        # Phase-I carries bookkeeping (region ids, valid masks, tail flags) through
+        # the decoder so the Lightning module can log coverage.  These are not
+        # model inputs; only the normal attention mask is forwarded to Caduceus.
+        model_kwargs = {
+            key: value
+            for key, value in w.items()
+            if not key.startswith("phase1_") and key != "valid_mask"
+        }
         if "state" in inspect.signature(model.forward).parameters.keys():
-            x, state = model(x, **w, state=_state)
+            x, state = model(x, **model_kwargs, state=_state)
         else:
-            x = model(x, **w)
+            x = model(x, **model_kwargs)
             state = None
         self._state = state
 

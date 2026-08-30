@@ -1,0 +1,30 @@
+_name_: onemaize_dna_mlm
+
+# Phase-I is independent of the annotation-aware sampler: one row per fixed
+# chr1--chr10 window, with chromosome tails retained and padded at read time.
+mode: full_genome
+data_dir: ${oc.env:ONEMAIZE_DATA_DIR,data/processed/onemaize_b73}
+full_genome_manifest: ${oc.env:ONEMAIZE_PHASE1_MANIFEST,data/processed/onemaize/B73/b73_phase1_8k_full_genome.parquet}
+fasta_path: ${oc.env:ONEMAIZE_B73_FASTA,data/processed/onemaize/B73/Zm-B73-REFERENCE-NAM-5.0.fa.gz}
+fasta_root: null
+genotype: B73
+sequence_type: dna
+species: Zea mays
+tokenizer_name: char
+context_length: 8192
+window_size: 8192
+stride: 8192
+tail_policy: pad
+mlm_probability: 0.15
+reverse_complement_probability: 0.5
+
+# The Phase-I train epoch is exactly len(manifest)=260239. Validation/test
+# are deterministic prefixes used for inexpensive checks.
+train_samples_per_epoch: null
+val_samples_per_epoch: 2048
+test_samples_per_epoch: 2048
+batch_size: 1
+batch_size_eval: 1
+shuffle: true
+seed: 2357
+allow_index_build: false

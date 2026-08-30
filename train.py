@@ -25,6 +25,7 @@ from src.dataloaders import SequenceDataset  # TODO make registry
 from src.tasks import decoders, encoders, tasks
 from src.utils import registry
 from src.utils.optim_groups import add_optimizer_hooks
+from src.onemaize.phase1_coverage import Phase1CoverageTracker
 
 log = src.utils.train.get_logger(__name__)
 
@@ -151,6 +152,7 @@ class SequenceLightningModule(pl.LightningModule):
         self.encoder, self.decoder, self.model = None, None, None
         self.task, self.loss, self.loss_val = None, None, None
         self.metrics, self.train_torchmetrics, self.val_torchmetrics, self.test_torchmetrics = None, None, None, None
+        self.phase1_coverage = None
         self.setup()
 
         self._state = None
@@ -171,6 +173,8 @@ class SequenceLightningModule(pl.LightningModule):
 
         if not self.hparams.train.disable_dataset:
             self.dataset.setup()
+            if getattr(self.dataset, "mode", None) == "full_genome":
+                self.phase1_coverage = Phase1CoverageTracker(self.dataset.dataset_train)
 
         # Convenience feature: if model specifies encoder, combine it with main encoder
         encoder_cfg = utils.to_list(self.hparams.encoder) + utils.to_list(
@@ -399,6 +403,11 @@ class SequenceLightningModule(pl.LightningModule):
         """Shared step logic between training, validation, and test"""
         self._process_state(batch, batch_idx, training=(prefix == "train"))
         x, y, w = self.forward(batch)
+
+        if prefix == "train" and self.phase1_coverage is not None:
+            region_ids = w.get("phase1_region_id")
+            if region_ids is not None:
+                self.phase1_coverage.update(region_ids)
     
        
 
@@ -445,6 +454,21 @@ class SequenceLightningModule(pl.LightningModule):
     def on_train_epoch_start(self):
         # Reset training torchmetrics
         self.task._reset_torchmetrics("train")
+        if self.phase1_coverage is not None:
+            self.phase1_coverage.reset()
+
+    def on_train_epoch_end(self):
+        if self.phase1_coverage is not None and self.phase1_coverage.has_seen:
+            device = next(self.parameters()).device
+            coverage_metrics = self.phase1_coverage.compute(device=device)
+            self.log_dict(
+                coverage_metrics,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                add_dataloader_idx=False,
+                sync_dist=False,
+            )
 
     def training_epoch_end(self, outputs):
         # Log training torchmetrics

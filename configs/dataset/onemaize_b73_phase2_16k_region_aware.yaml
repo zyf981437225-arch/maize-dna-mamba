@@ -1,0 +1,25 @@
+_name_: onemaize_dna_mlm
+
+# Phase-II keeps the existing gene/non-repeat/TE-aware dynamic crop sampler.
+mode: region_aware
+data_dir: ${oc.env:ONEMAIZE_DATA_DIR,data/processed/onemaize_b73}
+fasta_root: null
+sequence_type: dna
+species: Zea mays
+tokenizer_name: char
+context_length: 16384
+mlm_probability: 0.15
+reverse_complement_probability: 0.5
+max_n_fraction: 0.1
+max_crop_attempts: 16
+gene_probability: 0.5
+non_repeat_probability: 0.3
+te_rich_probability: 0.2
+train_samples_per_epoch: 100000
+val_samples_per_epoch: 2048
+test_samples_per_epoch: 2048
+batch_size: 1
+batch_size_eval: 1
+shuffle: false
+seed: 2357
+allow_index_build: false

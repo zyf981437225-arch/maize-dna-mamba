@@ -10,6 +10,88 @@
 > 在真实 NAM26 数据及 8 x H200 超算上完成实机验收。不要把 B73 结果描述成
 > 已完成的 26 材料正式实验。
 
+## 0. 老师确认的两阶段方案（当前实现）
+
+仓库现在同时提供两个彼此独立的 dataset mode，模型结构不变：
+
+| 阶段 | 数据语义 | 配置 |
+|---|---|---|
+| Phase-I | B73 chr1--chr10；8192 bp、stride=8192、无重叠、全覆盖；每条染色体尾部保留并右侧 PAD | `configs/experiment/onemaize_b73_phase1_8k_full_genome.yaml` |
+| Phase-II | 现有 region-aware sampler；gene-centered/non-repeat/TE-rich=50/30/20；动态 crop；context=16384 | `configs/experiment/onemaize_b73_phase2_16k_region_aware.yaml` |
+
+Phase-I manifest 是一个小型 Parquet 索引，不包含序列本身。每行固定一个
+`region_id`，包含 `genotype/chromosome/start/end/valid_bp/padded_bp/is_tail/`
+`window_size/stride/fasta/fasta_fai`。训练时只读取该坐标，PAD 位置的
+`attention_mask` 为 false、MLM label 为 PAD id=4，因此不会参与 loss 或 perplexity。
+训练集 `len()` 就是 manifest 行数 260,239；Phase-II 仍使用原来的 virtual
+`train_samples_per_epoch=100000`。
+
+### 0.1 服务器上的首次准备
+
+```bash
+export ONEMAIZE_B73_FASTA=/path/to/Zm-B73-REFERENCE-NAM-5.0.fa.gz
+export ONEMAIZE_PHASE1_MANIFEST=/path/to/b73_phase1_8k_full_genome.parquet
+test -f "$ONEMAIZE_B73_FASTA.fai" && test -f "$ONEMAIZE_B73_FASTA.gzi"
+python scripts/build_b73_phase1_8k_manifest.py \
+  --fasta "$ONEMAIZE_B73_FASTA" \
+  --output "$ONEMAIZE_PHASE1_MANIFEST"
+python scripts/validate_b73_phase1_8k_manifest.py \
+  --manifest "$ONEMAIZE_PHASE1_MANIFEST" --fasta "$ONEMAIZE_B73_FASTA"
+```
+
+也可以直接使用封装好的 launcher：
+
+```bash
+ONEMAIZE_B73_FASTA=/path/B73.fa.gz \
+ONEMAIZE_PHASE1_MANIFEST=/path/B73_phase1_8k.parquet \
+NUM_DEVICES=8 bash scripts/run_onemaize_phase1_h200.sh validate
+```
+
+### 0.2 推荐运行顺序（H200）
+
+先做短 benchmark，再做 20-step smoke；根据 benchmark 的 epoch 估计时间
+决定 `MAX_STEPS`、warmup 和作业时限。smoke 不会跑完整 260,239 条样本。
+
+```bash
+export ONEMAIZE_B73_FASTA=/path/B73.fa.gz
+export ONEMAIZE_PHASE1_MANIFEST=/path/B73_phase1_8k.parquet
+export NUM_DEVICES=8 BATCH_SIZE=1 NUM_WORKERS=8
+bash scripts/run_onemaize_phase1_h200.sh benchmark
+bash scripts/run_onemaize_phase1_h200.sh smoke
+MAX_STEPS=... WARMUP_STEPS=... \
+  bash scripts/run_onemaize_phase1_h200.sh train
+EVAL_CKPT=/path/to/checkpoints_best/val_loss.ckpt \
+  bash scripts/run_onemaize_phase1_h200.sh test
+```
+
+Phase-I benchmark 默认只测 100 个 optimizer steps，支持单卡或
+`torchrun --nproc_per_node=8`，会输出 FASTA I/O、global samples/tokens per
+second 和完整 epoch 秒数。训练 launcher 使用 Lightning DDP，固定
+`DistributedSampler(drop_last=False)`：world=1 为 260,239 条；world=8 为每卡
+32,530 条、全局 draws 260,240、理论重复 1 条。epoch 末尾会记录
+`train/phase1_samples_seen`、`phase1_unique_regions`、`phase1_unique_fraction`、
+`phase1_duplicate_fraction`、`phase1_genomic_bp_coverage` 和
+`phase1_tail_sequences_seen`。
+
+### 0.3 Phase-II 运行与检查
+
+老师服务器准备完 26 个材料的 schema-v3 `manifest.json` 后，仍按原流程构建
+region parquet，然后使用：
+
+```bash
+python scripts/audit_onemaize_phase2_candidate_lengths.py \
+  --data-dir /path/to/onemaize_metadata \
+  --output-md docs/audits/onemaize_b73/PHASE2_16K_CANDIDATE_LENGTH_AUDIT.md
+# Phase-II 的训练入口保持原有 run_onemaize_h200.sh 及 dynamic sampler。
+```
+
+当前 B73 审计中 gene-centered 39,021、non-repeat 143、TE-rich 124,986，
+共 164,150 个候选，全部不短于 16,384 bp；26 材料仍需逐材料重新审计。
+
+详细的修改前调用链和文件级审计见
+`docs/audits/onemaize_b73/PHASE1_FULL_GENOME_IMPLEMENTATION_AUDIT.md`；真实
+manifest 的独立核验见 `PHASE1_FULL_GENOME_VALIDATION.md`。
+
 ## 1. 当前阶段与未完成事项
 
 已完成：
@@ -590,6 +672,21 @@ checkpoints_resume/last.ckpt
 
 checkpoint 不提交到 GitHub。GitHub 只保存代码、配置、操作说明和小型 JSON/表格
 结果；大型模型放在课题组规定的模型存储中。
+
+### 3.2 Phase-I 全基因组结果与时间参考
+
+真实 B73 chr1--chr10 manifest 已独立验证：有效基因组 `2,131,846,805` bp，
+完整窗口 `260,229`，尾部窗口 `10`，尾部有效 bp `50,837`，保留/PAD 总 sequence
+`260,239`，PAD `31,083` bp，覆盖率 `100%`。直接丢弃尾部时为 `260,229` 条、
+覆盖率 `99.997615354%`。逐染色体表格见 `B73_8192_FULL_GENOME_SLICING_STATS.md`
+和 `.csv`，独立流程说明见 `docs/audits/onemaize_b73/`。
+
+在当前学校服务器单张 NVIDIA A100 80GB、BF16、121M 参数、batch=1、context=8192
+上做了 2 warmup + 10 measured steps 的短 benchmark：平均约 `0.441 s/step`，
+约 `2.27 sequences/s`（`18,564 tokens/s`），按 `260,239` 条完整 train epoch
+估算约 `114,841 s`（31.9 小时）。这是 A100 参考，不是 H200 实测；H200 应先运行
+同一 benchmark 再决定最终材料数、总步数和 wall-time。短 smoke 的 loss 从约
+`5.10` 降至 `2.03`，无 NaN/Inf；smoke 不产生大 checkpoint。
 
 ## 8. 停止标准
 

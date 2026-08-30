@@ -1,0 +1,30 @@
+{
+  "phase": "phase1_full_genome",
+  "device": "NVIDIA A100 80GB PCIe",
+  "world_size": 1,
+  "precision": "bf16",
+  "context_length": 8192,
+  "batch_size_per_gpu": 1,
+  "manifest_regions": 260239,
+  "measured_steps": 10,
+  "warmup_steps": 2,
+  "mean_step_seconds": 0.44129137564450505,
+  "global_samples_per_second": 2.2660764637412236,
+  "global_tokens_per_second": 18563.698390968104,
+  "estimated_epoch_seconds": 114841.22630635035,
+  "estimated_epoch_hours": 31.900340640652876,
+  "io_tokens_per_second": 89019.11760928167,
+  "losses": [
+    3.2145869731903076,
+    3.811624526977539,
+    2.3905816078186035,
+    1.8602828979492188,
+    1.496158242225647,
+    1.7009074687957764,
+    1.5174591541290283,
+    1.421135663986206,
+    1.4278900623321533,
+    1.4446170330047607
+  ],
+  "note": "A100 reference only; rerun the same benchmark on the target 8x H200 node."
+}
