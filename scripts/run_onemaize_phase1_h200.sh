@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Teacher-facing Phase-I launcher.  It is safe to run validate/benchmark first;
-# no command below uploads FASTA or checkpoints.  Lightning owns DDP for train.
+# Production Phase-I launcher for a single GPU node. No command uploads FASTA
+# or checkpoints. In a Slurm allocation the launcher starts one task per GPU.
 STAGE="${1:-validate}"
 case "$STAGE" in
   validate|benchmark|smoke|train|test) ;;
@@ -24,6 +24,7 @@ SMOKE_STEPS="${SMOKE_STEPS:-20}"
 SMOKE_WARMUP_STEPS="${SMOKE_WARMUP_STEPS:-2}"
 CHECKPOINT_INTERVAL="${CHECKPOINT_INTERVAL:-}"
 EVAL_CKPT="${EVAL_CKPT:-}"
+RESUME_CKPT="${RESUME_CKPT:-}"
 DRY_RUN="${DRY_RUN:-0}"
 
 die() { echo "ERROR: $*" >&2; exit 2; }
@@ -34,8 +35,31 @@ die() { echo "ERROR: $*" >&2; exit 2; }
 [[ -f "$B73_FASTA.fai" && -f "$B73_FASTA.gzi" ]] || die "B73 FASTA requires matching .fai and .gzi."
 [[ "$NUM_DEVICES" =~ ^[1-9][0-9]*$ ]] || die "NUM_DEVICES must be positive"
 [[ "$BATCH_SIZE" =~ ^[1-9][0-9]*$ ]] || die "BATCH_SIZE must be positive"
+if [[ -n "$RESUME_CKPT" && ! -f "$RESUME_CKPT" ]]; then die "Missing RESUME_CKPT: $RESUME_CKPT"; fi
 mkdir -p "$RUN_ROOT"
 cd "$ROOT_DIR"
+
+launch_command() {
+  local log_path="$1"
+  shift
+  local -a command=("$@")
+  if [[ "$DRY_RUN" == "1" ]]; then
+    printf 'DRY_RUN command:'; printf ' %q' "${command[@]}"; echo
+    return 0
+  fi
+  if [[ -n "${SLURM_PROCID:-}" ]]; then
+    die "Invoke this launcher once from sbatch; it creates the srun step."
+  fi
+  if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+    local allocated_tasks="${SLURM_NTASKS:-0}"
+    (( allocated_tasks >= NUM_DEVICES )) || die "SLURM_NTASKS=$allocated_tasks, NUM_DEVICES=$NUM_DEVICES"
+    srun --nodes=1 --ntasks="$NUM_DEVICES" --ntasks-per-node="$NUM_DEVICES" \
+      --kill-on-bad-exit=1 "${command[@]}" 2>&1 | tee "$log_path"
+    return "${PIPESTATUS[0]}"
+  fi
+  "${command[@]}" 2>&1 | tee "$log_path"
+  return "${PIPESTATUS[0]}"
+}
 
 if [[ "$STAGE" == "validate" ]]; then
   "$PYTHON_BIN" scripts/validate_b73_phase1_8k_manifest.py --manifest "$PHASE1_MANIFEST" --fasta "$B73_FASTA" | tee "$RUN_ROOT/validation.json"
@@ -105,13 +129,16 @@ if [[ "$STAGE" == "smoke" ]]; then
   # A smoke test must not fill a shared filesystem with full optimizer states.
   checkpoint_args=("~callbacks.periodic_checkpoint" "~callbacks.model_checkpoint_every_n_steps")
 fi
+resume_args=(train.ckpt=null)
+if [[ -n "$RESUME_CKPT" ]]; then
+  resume_args=(train.ckpt="$RESUME_CKPT")
+fi
 
 if [[ "$STAGE" == "test" ]]; then
   [[ -n "$EVAL_CKPT" && -f "$EVAL_CKPT" ]] || die "Set EVAL_CKPT to an existing checkpoint"
   command=("$PYTHON_BIN" -m train experiment="$experiment" trainer.devices="$NUM_DEVICES" trainer.accelerator=gpu trainer.max_epochs=null trainer.max_steps=1 scheduler.warmup_t=0 dataset.full_genome_manifest="$PHASE1_MANIFEST" dataset.fasta_path="$B73_FASTA" dataset.batch_size="$BATCH_SIZE_EVAL" dataset.batch_size_eval="$BATCH_SIZE_EVAL" loader.num_workers="$NUM_WORKERS" train.eval_only=true train.ckpt="$EVAL_CKPT" train.test=false wandb=null "~callbacks.periodic_checkpoint" hydra.run.dir="$RUN_DIR")
 else
-  command=("$PYTHON_BIN" -m train experiment="$experiment" trainer.devices="$NUM_DEVICES" trainer.accelerator=gpu trainer.max_epochs=null trainer.max_steps="$stage_max_steps" trainer.accumulate_grad_batches=1 dataset.full_genome_manifest="$PHASE1_MANIFEST" dataset.fasta_path="$B73_FASTA" dataset.train_samples_per_epoch=null dataset.batch_size="$BATCH_SIZE" dataset.batch_size_eval="$BATCH_SIZE_EVAL" loader.num_workers="$NUM_WORKERS" scheduler.warmup_t="$stage_warmup_steps" callbacks.model_checkpoint.dirpath="$RUN_DIR/checkpoints_best" callbacks.model_checkpoint.filename=val_loss callbacks.model_checkpoint_every_n_steps.dirpath="$RUN_DIR/checkpoints_resume" callbacks.model_checkpoint_every_n_steps.every_n_train_steps="$CHECKPOINT_INTERVAL" callbacks.model_checkpoint_every_n_steps.save_last=true wandb=null hydra.run.dir="$RUN_DIR" "${checkpoint_args[@]}")
+  command=("$PYTHON_BIN" -m train experiment="$experiment" trainer.devices="$NUM_DEVICES" trainer.accelerator=gpu trainer.max_epochs=null trainer.max_steps="$stage_max_steps" trainer.accumulate_grad_batches=1 dataset.full_genome_manifest="$PHASE1_MANIFEST" dataset.fasta_path="$B73_FASTA" dataset.train_samples_per_epoch=null dataset.batch_size="$BATCH_SIZE" dataset.batch_size_eval="$BATCH_SIZE_EVAL" loader.num_workers="$NUM_WORKERS" scheduler.warmup_t="$stage_warmup_steps" callbacks.model_checkpoint.dirpath="$RUN_DIR/checkpoints_best" callbacks.model_checkpoint.filename=val_loss callbacks.model_checkpoint_every_n_steps.dirpath="$RUN_DIR/checkpoints_resume" callbacks.model_checkpoint_every_n_steps.every_n_train_steps="$CHECKPOINT_INTERVAL" callbacks.model_checkpoint_every_n_steps.save_last=true wandb=null hydra.run.dir="$RUN_DIR" "${resume_args[@]}" "${checkpoint_args[@]}")
 fi
 printf 'Running Phase-I %s:' "$STAGE"; printf ' %q' "${command[@]}"; echo
-if [[ "$DRY_RUN" == "1" ]]; then exit 0; fi
-"${command[@]}" 2>&1 | tee "$RUN_DIR/console.log"
+launch_command "$RUN_DIR/console.log" "${command[@]}"
