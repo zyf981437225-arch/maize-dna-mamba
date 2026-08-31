@@ -1,422 +1,158 @@
-# Maize DNA-Mamba / OneMaize
+# OneMaize
 
-本仓库提供玉米基因组 DNA-Mamba 的两阶段预训练流程。当前版本将数据构建、完整性校验、性能基准、分布式 smoke test、正式训练、断点续训和评估拆成可独立执行的步骤，适用于单节点 8×H200，也可先在单卡 A100/H200 上完成小规模验证。
+Population-aware genomic language modeling for maize.
 
-## 1. 当前训练方案
+本 README 是当前仓库的实验操作手册。操作顺序为：原始文件与索引检查、正式输入表冻结、schema-v3 candidate metadata 构建、B73 Phase-I、NAM26 Phase-II continuation、validation/test。命令以仓库当前 `main` 分支的真实脚本和参数为准。
 
-| 阶段 | 数据 | 序列长度 | 采样方式 | 主要目标 |
-| --- | --- | ---: | --- | --- |
-| Phase I | B73，染色体 1–10 | 8,192 bp | 从坐标 0 开始连续、非重叠切片；末尾不足 8,192 bp 的片段保留并 PAD | 建立全基因组基础表示 |
-| Phase II | B73 + 25 个 NAM 材料 | 16,384 bp | gene / TE / intergenic 按 50% / 30% / 20% 采样，并在候选区域内动态裁剪 | 扩展跨材料和功能区域表示 |
+> **B73 pipeline has been validated.**
+>
+> **NAM26 has not yet been run end-to-end on the final 26-genotype dataset.**
 
-两阶段的定义不可混用：Phase I 不使用 region-aware sampler；Phase II 不使用固定的全基因组非重叠窗口。
+## Project status
 
-当前实现状态：
+状态定义：
 
-- Phase I 的 B73 manifest 构建、严格校验、dataset、训练配置、benchmark、smoke test 和审计脚本已经完成。
-- Phase II 的 16K region-aware sampler 保持原设计；B73 候选区域已经通过长度审计。
-- 26 个材料的正式 Phase II metadata 仍需在全部 FASTA/GFF3 到位后构建并验收。
-- 8×H200 的最终 batch size、吞吐率和训练预算应以目标计算节点上的 benchmark 结果为准。
+- **VALIDATED**：已使用真实 B73 数据或真实 A100 运行并留下审计记录。
+- **IMPLEMENTED BUT NOT FORMALLY VALIDATED**：代码和测试存在，但最终 NAM26 数据或 8×H200 实验尚未完成。
+- **PLANNED**：当前仓库没有可直接执行的完整入口。
 
-## 2. 模型与训练定义
+| Component | B73 | NAM26 |
+| --- | --- | --- |
+| FASTA/FAI/GZI random access | **VALIDATED** | **IMPLEMENTED BUT NOT FORMALLY VALIDATED** |
+| schema-v3 candidate metadata | **VALIDATED** | **IMPLEMENTED BUT NOT FORMALLY VALIDATED** |
+| Phase-I 8K full-genome manifest | **VALIDATED** | **PLANNED**；没有多 genotype manifest/loader |
+| Phase-I A100 benchmark/smoke | **VALIDATED** | **PLANNED** |
+| Phase-I 8×H200 | **IMPLEMENTED BUT NOT FORMALLY VALIDATED**，仅 B73 | **PLANNED** |
+| Phase-II 16K candidate compatibility | **VALIDATED** | **IMPLEMENTED BUT NOT FORMALLY VALIDATED** |
+| Phase-II checkpoint continuation | **IMPLEMENTED BUT NOT FORMALLY VALIDATED** | **IMPLEMENTED BUT NOT FORMALLY VALIDATED** |
+| genotype-held-out validation/test | pilot only | **IMPLEMENTED BUT NOT FORMALLY VALIDATED** |
+| final training | 未完成 | 未完成 |
 
-- backbone：双向 Mamba DNA language model
-- 层数：24
-- hidden size：864
-- 参数量：约 121,191,553
-- 词表：`A/C/G/T/N`，`PAD=4`
-- 训练目标：masked language modeling
-- mask 比例：15%
-- 被选中位置：80% 替换为 MASK/N，10% 替换为随机碱基，10% 保留原碱基
-- 训练集 reverse-complement 概率：0.5
-- 验证集和测试集：确定性，不做随机 reverse-complement
-- 数值精度：BF16
-- Phase II 正式材料划分：23 train / 1 validation / 2 test，且 B73 必须在 train split
+当前 Phase-I production path 是 **B73-only**：builder 可接收 `--genotype` 和 `--chromosomes`，但 validator、dataset config、launcher 和一个 epoch 的已验证统计均固定为 B73 chr1–chr10；仓库没有把 26 个 full-genome manifest 合并为同一次 Phase-I 训练的入口。因此，当前可执行两阶段流程是 **B73 Phase-I → NAM26 Phase-II**，不能写成 NAM26 全部材料共同完成 Phase-I。
 
-## 3. 关键入口
+## Training design
 
-| 用途 | 文件 |
-| --- | --- |
-| Phase I manifest 构建 | `scripts/build_b73_phase1_8k_manifest.py` |
-| Phase I manifest 校验 | `scripts/validate_b73_phase1_8k_manifest.py` |
-| Phase I dataset | `src/dataloaders/datasets/b73_full_genome.py` |
-| Phase I 训练配置 | `configs/experiment/onemaize_b73_phase1_8k_full_genome.yaml` |
-| Phase I benchmark | `scripts/benchmark_b73_phase1_8k.py` |
-| Phase I 启动器 | `scripts/run_onemaize_phase1_h200.sh` |
-| Phase I Slurm 模板 | `slurm_scripts/run_onemaize_phase1_h200.slurm` |
-| Phase I 切片统计 | `scripts/stat_b73_8192_full_genome_slicing.py` |
-| Phase II region metadata 构建 | `scripts/build_onemaize_regions.py` |
-| Phase II 数据校验 | `scripts/validate_onemaize_data.py` |
-| Phase II 候选长度审计 | `scripts/audit_onemaize_phase2_candidate_lengths.py` |
-| Phase II 训练配置 | `configs/experiment/onemaize_b73_phase2_16k_region_aware.yaml` |
-| Phase II 启动器 | `scripts/run_onemaize_h200.sh` |
-| Phase II Slurm 模板 | `slurm_scripts/run_onemaize_h200.slurm` |
+```text
+                        OneMaize
 
-## 4. 完整执行顺序
+ B73 BGZF FASTA                              26 NAM genotypes
+       |                              FASTA + gene GFF3 + TE GFF3
+       v                                         |
+ Phase I: B73-only                              v
+ fixed 8,192-bp windows                  schema-v3 metadata
+ stride=8,192; tail PAD                         |
+       |                              32,768-bp candidate regions
+       v                                  /       |       \
+ 15% MLM + train RC=0.5          gene-centered non-repeat TE-rich
+       |                               50%        30%      20%
+       v                                  \       |       /
+ Phase-I best checkpoint                         |
+       |                                         |
+       +------------------+----------------------+
+                          v
+                Phase II: NAM26 16K
+              dynamic 16,384-bp crop
+                          |
+                          v
+                MLM context continuation
+                          |
+                          v
+             validation / held-out test
+```
 
-正式运行按以下顺序进行；前一项未通过时，不进入下一项。
+模型保持仓库现有的 `mamba_ssm.modules.mamba_simple.Mamba` 双向 Caduceus 实现，不是 Mamba2。正式模型为 24 layers、`d_model=864`、约 121,191,553 parameters，使用 BF16、15% MLM、80/10/10 corruption、single-base `A/C/G/T/N` tokenizer 和训练集 0.5 reverse-complement augmentation。
 
-1. 克隆仓库并建立 Python/CUDA 环境。
-2. 准备带 `.fai` 和 `.gzi` 索引的 B73 BGZF FASTA。
-3. 构建 Phase I 的 8,192-bp 全基因组 manifest。
-4. 严格校验 Phase I manifest，并运行单元测试。
-5. 在目标 GPU 节点运行 Phase I benchmark。
-6. 运行 8 卡 Phase I smoke test，检查 loss、显存、吞吐和 checkpoint。
-7. 根据 benchmark 冻结 batch size 和训练步数，提交 Phase I 正式训练。
-8. 监控训练，并在中断时从 `last.ckpt` 恢复。
-9. 使用 Phase I 最优 checkpoint 完成技术评估并归档结果。
-10. 全部 26 个材料到位后构建 Phase II metadata，冻结 23/1/2 split。
-11. 对 Phase II 做严格校验、16K benchmark 和 8 卡 smoke test。
-12. 从 Phase I 最优 checkpoint 初始化 Phase II，提交正式训练并评估 held-out genotypes。
+### Do not confuse these three lengths
 
-## 5. 环境准备
+| 参数 | 长度 | 用途 |
+| --- | ---: | --- |
+| Phase-I window/stride | 8,192 bp | B73 fixed full-genome model input |
+| Phase-II candidate span | 32,768 bp | genome-wide repeat classification/candidate construction |
+| Phase-II dynamic crop | 16,384 bp | 实际 Phase-II model input |
 
-### 5.1 获取代码
+`32K candidate != 16K model input`。Phase-II 从 32K candidate 内动态选择 16K crop；gene-centered candidate 可以长于 32K，但必须至少为 16K。Phase-I 则严格要求 `window=8192` 且 `stride=8192`。
+
+## Quick Start: from 26 raw genomes to training
+
+本节给出执行顺序；每一步的输入、输出和通过条件在后文展开。
+
+### Step 0 — Clone
 
 ```bash
 git clone https://github.com/zyf981437225-arch/maize-dna-mamba.git
 cd maize-dna-mamba
 export PROJECT_DIR="$PWD"
+git rev-parse HEAD
 ```
 
-### 5.2 建立环境
+### Step 1 — Create the repository environment
 
-仓库提供 Linux 环境安装脚本：
+仓库的可复现安装入口是 `setup_linux_env.sh`，要求 Python 3.10：
 
 ```bash
+command -v python3.10
 bash setup_linux_env.sh
 source .venv/bin/activate
+python --version
 ```
 
-如果超算已经提供 Conda 环境，也可以直接激活已有环境：
+`caduceus_env.yml` 是完整环境快照，但包含导出机器的 site-specific prefix；不要直接依赖其中的 prefix。需要 Conda 时用命令行名称覆盖：
 
 ```bash
-source "$(conda info --base)/etc/profile.d/conda.sh"
+conda env create --name caduceus_env --file caduceus_env.yml
 conda activate caduceus_env
 ```
 
-确认 PyTorch、CUDA、GPU 数量和 BF16：
+### Step 2 — Set storage paths
+
+只需在当前 shell 设置一次。把 `/data/onemaize` 改为目标并行文件系统上的实际目录：
 
 ```bash
-python - <<'PY'
-import torch
-print("torch:", torch.__version__)
-print("cuda runtime:", torch.version.cuda)
-print("cuda available:", torch.cuda.is_available())
-print("gpu count:", torch.cuda.device_count())
-print("bf16 supported:", torch.cuda.is_bf16_supported())
-for i in range(torch.cuda.device_count()):
-    print(i, torch.cuda.get_device_name(i))
-PY
+export ONEMAIZE_ROOT=/data/onemaize
+export RAW_ROOT="$ONEMAIZE_ROOT/raw"
+export INPUT_MANIFEST="$ONEMAIZE_ROOT/manifests/onemaize_26.tsv"
+export ONEMAIZE_DATA_DIR="$ONEMAIZE_ROOT/metadata/nam26_schema_v3"
+export ONEMAIZE_B73_FASTA="$RAW_ROOT/B73/genome.fa.gz"
+export ONEMAIZE_PHASE1_DIR="$ONEMAIZE_ROOT/metadata/b73_phase1_8k"
+export ONEMAIZE_PHASE1_MANIFEST="$ONEMAIZE_PHASE1_DIR/b73_phase1_8k_full_genome.parquet"
+export PHASE1_RUN_ROOT="$ONEMAIZE_ROOT/runs/b73_phase1_8k"
+export PHASE2_RUN_ROOT="$ONEMAIZE_ROOT/runs/nam26_phase2_16k"
+
+mkdir -p "$ONEMAIZE_ROOT/manifests" "$ONEMAIZE_PHASE1_DIR"
+mkdir -p "$PHASE1_RUN_ROOT" "$PHASE2_RUN_ROOT"
 ```
 
-正式训练前还应检查磁盘。建议为 metadata、日志、多个 checkpoint 和临时文件预留至少 50 GB：
+### Step 3 — Prepare indexes and freeze `onemaize_26.tsv`
 
-```bash
-df -h "$PROJECT_DIR"
-```
+每个 genotype 需要 FASTA、匹配的 FAI/GZI、gene GFF3 和 TE GFF3。先确定最终 1 个 validation genotype 和 2 个 test genotypes；B73 必须保持为 train。按后文 “NAM26 preparation workflow” 建立精确为 26 行的输入表。
 
-## 6. Phase I：B73 8K 全基因组预训练
-
-### 6.1 准备路径
-
-FASTA 必须是可随机访问的 BGZF 文件，并同时存在同名前缀的 `.fai` 和 `.gzi`：
-
-```bash
-export ONEMAIZE_B73_FASTA=/shared/onemaize/raw/B73/Zm-B73-REFERENCE-NAM-5.0.fa.gz
-export ONEMAIZE_PHASE1_DIR=/shared/onemaize/metadata/phase1_b73_8k
-export ONEMAIZE_PHASE1_MANIFEST=$ONEMAIZE_PHASE1_DIR/B73_phase1_8192_full_genome.parquet
-export RUN_ROOT=/shared/onemaize/runs/phase1_b73_8k
-export NUM_DEVICES=8
-export BATCH_SIZE=1
-export BATCH_SIZE_EVAL=1
-export NUM_WORKERS=8
-
-test -f "$ONEMAIZE_B73_FASTA"
-test -f "$ONEMAIZE_B73_FASTA.fai"
-test -f "$ONEMAIZE_B73_FASTA.gzi"
-mkdir -p "$ONEMAIZE_PHASE1_DIR" "$RUN_ROOT"
-```
-
-### 6.2 构建固定窗口 manifest
+### Step 4 — Build B73 Phase-I manifest
 
 ```bash
 python scripts/build_b73_phase1_8k_manifest.py \
   --fasta "$ONEMAIZE_B73_FASTA" \
   --output "$ONEMAIZE_PHASE1_MANIFEST" \
+  --genotype B73 \
+  --chromosomes chr1 chr2 chr3 chr4 chr5 chr6 chr7 chr8 chr9 chr10 \
   --window-size 8192 \
   --stride 8192
-```
 
-构建规则：
-
-- 只使用 B73 染色体 1–10。
-- 每条染色体从坐标 0 开始，以 `window_size=8192`、`stride=8192` 连续切片。
-- 完整窗口的 `valid_length=8192`。
-- 每条染色体最后不足 8,192 bp 的尾部保留一条记录，并在 dataset 中 PAD 到 8,192 token。
-- PAD token 不参与 MLM loss。
-- 每个有效基因组 bp 恰好被覆盖一次，不重叠、不遗漏。
-
-当前 B73 参考基因组的预期统计如下：
-
-| 指标 | 数值 |
-| --- | ---: |
-| chr1–10 总有效长度 | 2,131,846,805 bp |
-| 完整 8,192-bp 窗口 | 260,229 |
-| 尾部窗口 | 10 |
-| manifest 总序列数 | 260,239 |
-| 尾部有效 bp | 50,837 |
-| 需要 PAD 的 token | 31,083 |
-| 有效 bp 覆盖比例 | 100% |
-
-若结果与该表不同，应先检查参考版本、染色体命名和索引，不要直接开始训练。
-
-### 6.3 严格校验 manifest
-
-```bash
 python scripts/validate_b73_phase1_8k_manifest.py \
   --manifest "$ONEMAIZE_PHASE1_MANIFEST" \
-  --fasta "$ONEMAIZE_B73_FASTA" \
-  | tee "$ONEMAIZE_PHASE1_DIR/validation.json"
+  --fasta "$ONEMAIZE_B73_FASTA"
 ```
 
-该步骤检查染色体集合、窗口顺序、边界、重叠/缺口、尾部策略、总覆盖量以及 FASTA 一致性。只有命令返回 0 且报告为通过时才能继续。
-
-### 6.4 运行测试
+### Step 5 — Build and validate NAM26 schema-v3 candidates
 
 ```bash
-python -m pytest -q \
-  tests/test_onemaize_phase1.py \
-  tests/test_onemaize_pipeline.py \
-  tests/test_maize_dna_pipeline.py
-```
-
-当前版本预期为 `18 passed`。
-
-### 6.5 性能 benchmark
-
-Slurm 节点上提交：
-
-```bash
-export CONDA_ENV_NAME=caduceus_env
-sbatch --export=ALL,STAGE=benchmark \
-  slurm_scripts/run_onemaize_phase1_h200.slurm
-```
-
-已经处于交互式 GPU 节点时，可直接运行：
-
-```bash
-BENCHMARK_WARMUP_STEPS=5 \
-BENCHMARK_STEPS=100 \
-bash scripts/run_onemaize_phase1_h200.sh benchmark
-```
-
-输出写入 `$RUN_ROOT/benchmark.json`。至少记录：单步耗时、sequences/s、tokens/s、峰值显存、I/O 吞吐和 GPU 数量。正式训练预算必须由目标 H200 节点的实测结果推导。
-
-### 6.6 8 卡 smoke test
-
-```bash
-export SMOKE_STEPS=20
-export SMOKE_WARMUP_STEPS=2
-export CHECKPOINT_INTERVAL=20
-
-sbatch --export=ALL,STAGE=smoke \
-  slurm_scripts/run_onemaize_phase1_h200.slurm
-```
-
-验收条件：
-
-- 8 个 rank 均正常启动，且没有 NCCL hang。
-- 无 `NaN`、`Inf`、CUDA OOM 或 traceback。
-- train loss 能在很短的 smoke 过程中明显下降。
-- GPU 利用率和显存占用合理。
-- smoke test 不保存完整的周期性 optimizer checkpoint，避免无意义占满共享磁盘。
-
-### 6.7 计算一个 epoch 的步数
-
-Phase I manifest 固定为 `N=260,239` 条序列。DistributedSampler 会把每个 rank 补齐到相同长度：
-
-```text
-world_size = 8
-samples_per_rank = ceil(260239 / 8) = 32530
-global_draws_per_epoch = 32530 × 8 = 260240
-sampler padding duplicates = 1
-```
-
-optimizer step 数公式为：
-
-```text
-steps_per_epoch = ceil(samples_per_rank / (batch_size_per_gpu × accumulate_grad_batches))
-```
-
-默认 `8 GPU × batch 1 × accumulate 1` 时，一个数据 epoch 为 32,530 optimizer steps。若 batch size 或梯度累积发生变化，必须重新计算，不能沿用 32,530。
-
-### 6.8 提交 Phase I 正式训练
-
-以下示例训练一个完整数据 epoch，warmup 取总步数约 5%。`MAX_STEPS` 表示本次实验的总目标步数：
-
-```bash
-export RUN_ROOT=/shared/onemaize/runs/phase1_b73_8k_production
-export NUM_DEVICES=8
-export BATCH_SIZE=1
-export BATCH_SIZE_EVAL=1
-export NUM_WORKERS=8
-export MAX_STEPS=32530
-export WARMUP_STEPS=1626
-export CHECKPOINT_INTERVAL=2000
-
-sbatch --export=ALL,STAGE=train \
-  slurm_scripts/run_onemaize_phase1_h200.slurm
-```
-
-主要输出：
-
-```text
-$RUN_ROOT/train/console.log
-$RUN_ROOT/train/checkpoints_best/val_loss.ckpt
-$RUN_ROOT/train/checkpoints_resume/last.ckpt
-```
-
-Phase I dataset 还会记录窗口覆盖审计指标，包括实际样本数、唯一窗口数、重复窗口数和覆盖比例。一个完整 epoch 结束后，应确认唯一窗口覆盖接近 260,239；DistributedSampler 允许出现预期的 1 条补齐重复。
-
-若计划训练多个数据 epoch，可把 `MAX_STEPS` 设为 `32530 × epoch 数`。建议先完成一个 epoch 并检查 validation loss，再决定是否延长。
-
-### 6.9 实时监控
-
-```bash
-# 查看作业状态
-squeue -u "$USER"
-
-# 实时查看训练日志
-tail -f "$RUN_ROOT/train/console.log"
-
-# 提取 loss、epoch 和 step
-grep -E "train/loss|val/loss|epoch|global_step" \
-  "$RUN_ROOT/train/console.log" | tail -n 50
-
-# 查看 GPU
-nvidia-smi
-
-# 查看磁盘和 checkpoint 大小
-df -h "$RUN_ROOT"
-du -sh "$RUN_ROOT/train"/* 2>/dev/null
-ls -lh "$RUN_ROOT/train/checkpoints_best" \
-       "$RUN_ROOT/train/checkpoints_resume"
-```
-
-### 6.10 断点续训
-
-作业因时间限制或节点故障退出后，从同一次实验的 `last.ckpt` 恢复：
-
-```bash
-export RESUME_CKPT="$RUN_ROOT/train/checkpoints_resume/last.ckpt"
-export MAX_STEPS=32530
-export WARMUP_STEPS=1626
-
-sbatch --export=ALL,STAGE=train \
-  slurm_scripts/run_onemaize_phase1_h200.slurm
-```
-
-`MAX_STEPS` 是恢复后的总目标 global step，不是额外增加的步数。例如 checkpoint 已在 step 20,000，`MAX_STEPS=32,530` 时会继续到 32,530。
-
-### 6.11 Phase I 技术评估
-
-```bash
-export EVAL_CKPT="$RUN_ROOT/train/checkpoints_best/val_loss.ckpt"
-
-sbatch --export=ALL,STAGE=test \
-  slurm_scripts/run_onemaize_phase1_h200.slurm
-```
-
-Phase I 的 validation/test 是 B73 内部的确定性评估，用于检查训练质量和选择 checkpoint，不代表跨材料泛化性能。跨材料结论应来自 Phase II 的 held-out genotype test split。
-
-## 7. Phase II：NAM26 16K region-aware 预训练
-
-### 7.1 每个材料需要的文件
-
-每个材料至少需要：
-
-- BGZF FASTA：`*.fa.gz`
-- FASTA 索引：`*.fa.gz.fai`
-- BGZF 索引：`*.fa.gz.gzi`
-- gene annotation：GFF3
-- TE annotation：GFF3
-
-推荐目录结构：
-
-```text
-/shared/onemaize/raw/
-├── B73/
-│   ├── genome.fa.gz
-│   ├── genome.fa.gz.fai
-│   ├── genome.fa.gz.gzi
-│   ├── genes.gff3.gz
-│   └── transposable_elements.gff3.gz
-├── B97/
-│   └── ...
-└── ...
-```
-
-正式材料集合必须恰好包含：
-
-```text
-B73 B97 CML103 CML228 CML247 CML277 CML322 CML333 CML52 CML69
-Hp301 Il14H Ki11 Ki3 Ky21 M162W M37W Mo18W Ms71 NC350 NC358
-Oh43 Oh7B P39 Tx303 Tzi8
-```
-
-### 7.2 冻结输入表和数据划分
-
-先建立 `onemaize_26.tsv`，每行一个材料：
-
-```text
-genotype<TAB>fasta<TAB>gene_gff<TAB>te_gff<TAB>split
-```
-
-示例：
-
-```text
-B73	/shared/onemaize/raw/B73/genome.fa.gz	/shared/onemaize/raw/B73/genes.gff3.gz	/shared/onemaize/raw/B73/transposable_elements.gff3.gz	train
-B97	/shared/onemaize/raw/B97/genome.fa.gz	/shared/onemaize/raw/B97/genes.gff3.gz	/shared/onemaize/raw/B97/transposable_elements.gff3.gz	train
-```
-
-要求：
-
-- 23 个 train、1 个 validation、2 个 test。
-- B73 必须属于 train。
-- split 一旦用于正式实验就应冻结，并与模型结果一起归档。
-- validation/test genotype 不得进入训练 sampler。
-
-### 7.3 构建 Phase II metadata
-
-```bash
-export ONEMAIZE_DATA_DIR=/shared/onemaize/metadata/phase2_nam26
-mkdir -p "$ONEMAIZE_DATA_DIR"
-
 python scripts/build_onemaize_regions.py \
-  --input-manifest /shared/onemaize/manifests/onemaize_26.tsv \
+  --input-manifest "$INPUT_MANIFEST" \
   --output-dir "$ONEMAIZE_DATA_DIR" \
   --max-n-fraction 0.10 \
-  --formal \
-  | tee "$ONEMAIZE_DATA_DIR/build.log"
-```
+  --formal
 
-核心输出：
-
-```text
-$ONEMAIZE_DATA_DIR/manifest.json
-$ONEMAIZE_DATA_DIR/genomes.parquet
-$ONEMAIZE_DATA_DIR/regions.parquet
-```
-
-`--formal` 是正式数据门禁：材料数、材料名称、split、索引、染色体映射或 annotation 有问题时会直接失败。不要通过删除该参数绕过数据问题。
-
-### 7.4 校验 Phase II 数据
-
-```bash
-export RUN_ROOT=/shared/onemaize/runs/phase2_nam26_preflight
+export RUN_ROOT="$ONEMAIZE_ROOT/runs/nam26_preflight"
 export REQUIRE_FORMAL=1
-
 bash scripts/run_onemaize_h200.sh validate
 
 python scripts/audit_onemaize_phase2_candidate_lengths.py \
@@ -425,13 +161,604 @@ python scripts/audit_onemaize_phase2_candidate_lengths.py \
   --output-md "$ONEMAIZE_DATA_DIR/phase2_16k_candidate_audit.md"
 ```
 
-校验内容包括：schema、26 材料集合、23/1/2 split、B73 归属、FASTA/索引可读性、GFF3 seqid 映射、region 边界、N 比例以及 16K 动态裁剪的候选长度。
-
-### 7.5 单张 H200 的 16K benchmark
-
-先在单卡测可行 batch size 和显存：
+### Step 6 — Run Phase-I benchmark, smoke, then train
 
 ```bash
+export RUN_ROOT="$PHASE1_RUN_ROOT"
+export NUM_DEVICES=8
+export BATCH_SIZE=1
+export BATCH_SIZE_EVAL=1
+export NUM_WORKERS=8
+
+sbatch --export=ALL,STAGE=benchmark slurm_scripts/run_onemaize_phase1_h200.slurm
+sbatch --export=ALL,STAGE=smoke slurm_scripts/run_onemaize_phase1_h200.slurm
+```
+
+确认 benchmark 和 smoke 通过后，再按后文 “Phase I” 计算并设置 `MAX_STEPS`、`WARMUP_STEPS` 和 `CHECKPOINT_INTERVAL`，提交 `STAGE=train`。
+
+### Step 7 — Continue at Phase-II 16K
+
+```bash
+export RUN_ROOT="$PHASE2_RUN_ROOT"
+export INIT_CKPT="$PHASE1_RUN_ROOT/train/checkpoints_best/val_loss.ckpt"
+export NUM_DEVICES=8
+export BATCH_SIZE=1
+export BATCH_SIZE_EVAL=1
+export GRAD_ACCUM=1
+export NUM_WORKERS=8
+export REQUIRE_FORMAL=1
+```
+
+先运行单 H200 16K benchmark 和 8 卡短训练；通过后再冻结正式步数。详细命令见后文 “Phase II”。
+
+## Environment and dependencies
+
+`setup_linux_env.sh` 固定以下核心版本：
+
+| Component | Repository environment |
+| --- | --- |
+| Python | 3.10 |
+| PyTorch | 2.2.0 + cu121 |
+| torchvision / torchaudio | 0.17.0 / 2.2.0 |
+| mamba-ssm | 1.2.2，代码导入 `mamba_simple.Mamba` |
+| causal-conv1d | 1.2.0.post2 |
+| Hydra / OmegaConf | 1.3.2 / 2.3.0 |
+| PyTorch Lightning | 1.8.6 |
+| pyarrow | 14.0.2 |
+| Biopython / pyfaidx | 1.81 / 0.8.1.1 |
+| pytest | 8.0.2 |
+
+`pysam` 是可选 FASTA backend，不在 `requirements-core.txt` 中；未安装时，BGZF 读取器使用 Biopython。`caduceus_env.yml` 快照包含 `pysam==0.22.0`。系统还需要 `samtools` 和 `bgzip` 来生成 FASTA 索引，它们不是 Python requirements 的一部分。
+
+环境验收：
+
+```bash
+python - <<'PY'
+import importlib
+import torch
+
+for name in ("mamba_ssm", "causal_conv1d", "pyarrow", "hydra", "pytorch_lightning", "Bio"):
+    module = importlib.import_module(name)
+    print(name, getattr(module, "__version__", "imported"))
+print("torch", torch.__version__)
+print("torch CUDA", torch.version.cuda)
+print("CUDA available", torch.cuda.is_available())
+print("BF16 supported", torch.cuda.is_available() and torch.cuda.is_bf16_supported())
+print("visible GPUs", torch.cuda.device_count())
+PY
+```
+
+> 如果 Mamba/CUDA wheel 与目标集群 driver 或 PyTorch ABI 不兼容，应停在环境阶段处理；不要进入数据构建或训练。
+
+## Data preparation
+
+### Required file types and recommended layout
+
+文件名不由代码固定；真实路径由 `onemaize_26.tsv` 指定。以下只是推荐布局：
+
+```text
+/data/onemaize/raw/
+├── B73/
+│   ├── genome.fa.gz
+│   ├── genome.fa.gz.fai
+│   ├── genome.fa.gz.gzi
+│   ├── genes.gff3.gz
+│   └── TE.gff3.gz
+├── B97/
+│   └── ...
+├── CML103/
+│   └── ...
+└── Tzi8/
+    └── ...
+```
+
+### NAM26 genotype panel
+
+正式 `--formal` 模式按大小写不敏感方式验证以下 26 个名称；建议保持源码中的标准拼写：
+
+|  |  |  |  |
+| --- | --- | --- | --- |
+| B73 | B97 | CML103 | CML228 |
+| CML247 | CML277 | CML322 | CML333 |
+| CML52 | CML69 | Hp301 | Il14H |
+| Ki3 | Ki11 | Ky21 | M162W |
+| M37W | Mo18W | MS71 | NC350 |
+| NC358 | Oh43 | Oh7B | P39 |
+| Tx303 | Tzi8 |  |  |
+
+正式 split 必须为 `23 train / 1 val / 2 test`，且 B73 必须在 train。仓库当前没有已经冻结的正式 held-out genotype 文件。
+
+> **The final held-out genotypes must be specified before formal manifest construction.**
+
+### What each input file is used for
+
+| 文件 | 用途 | Phase I | Phase II |
+| --- | --- | :---: | :---: |
+| FASTA | DNA sequence | ✓，当前仅 B73 | ✓，26 genotypes |
+| `.fai` | contig length/offset random-access index | ✓ | ✓ |
+| `.gzi` | BGZF compressed-offset index | ✓ | ✓ |
+| gene GFF3 | protein-coding gene coordinates | — | ✓ |
+| TE GFF3 | TE union coverage | — | ✓ |
+
+当前 region builder 只接受 9-column GFF3，不直接接受 BED。
+
+Gene candidate 使用 `feature_type == gene` 的坐标；若 GFF3 提供 `biotype` 或 `gene_biotype`，非 `protein_coding` gene 会被排除。候选区间为 gene body 上下游各 5 kb，并在必要时扩展到至少 16,384 bp。
+
+TE-rich 不按 TE 条目数判断。`src/onemaize/regions.py` 先合并重叠 TE 区间，再计算：
+
+```text
+repeat coverage = unique TE-covered bp / candidate length
+repeat coverage >= 0.5  -> te_rich
+repeat coverage <  0.5  -> non_repeat
+```
+
+non-repeat 32K tile 默认排除与 protein-coding gene body 重叠的候选。所有候选的 `N` 比例默认不得超过 0.10。
+
+## NAM26 preparation workflow
+
+### Step 1 — Build or verify FASTA indexes
+
+**Input**
+
+```text
+One FASTA per genotype. Compressed inputs must be BGZF, not ordinary gzip.
+```
+
+**Command**
+
+已有发布方提供且与 FASTA 完全匹配的 `.fai/.gzi` 时直接保留。需要从 plain FASTA 建立 BGZF 和索引时：
+
+```bash
+command -v bgzip
+command -v samtools
+bgzip -@ 8 -c genome.fa > genome.fa.gz
+samtools faidx genome.fa.gz
+test -s genome.fa.gz.fai
+test -s genome.fa.gz.gzi
+```
+
+**Expected output**
+
+```text
+genome.fa.gz
+genome.fa.gz.fai
+genome.fa.gz.gzi
+```
+
+**Pass condition**
+
+三个文件非空，且 `samtools faidx genome.fa.gz chr1:1-100` 能返回序列。
+
+**Do not continue if**
+
+FASTA 是普通 gzip、索引来自另一版 FASTA、缺失 `.fai/.gzi`，或主染色体名称不能映射到 `chr1`–`chr10`。
+
+### Step 2 — Freeze the 26-row input manifest
+
+**Input**
+
+```text
+26 genotypes × (FASTA, gene GFF3, TE GFF3, split)
+```
+
+**Command / file format**
+
+建立 TSV，header 必须精确为：
+
+```text
+genotype	fasta	genes_gff3	te_gff3	split
+```
+
+示例行：
+
+```text
+B73	/data/onemaize/raw/B73/genome.fa.gz	/data/onemaize/raw/B73/genes.gff3.gz	/data/onemaize/raw/B73/TE.gff3.gz	train
+B97	/data/onemaize/raw/B97/genome.fa.gz	/data/onemaize/raw/B97/genes.gff3.gz	/data/onemaize/raw/B97/TE.gff3.gz	train
+```
+
+列名是 `genes_gff3`，不是 `gene_gff`。路径可使用任意文件名，但必须是实际可访问路径。TSV 内的 `$VARIABLE` 不会被 builder 自动展开，应写展开后的真实路径。
+
+**Expected output**
+
+```text
+$INPUT_MANIFEST
+```
+
+**Pass condition**
+
+精确 26 个非空数据行、名称与 NAM26 panel 一致、23/1/2 split、B73=train，且 held-out genotype 已在实验开始前冻结。
+
+**Do not continue if**
+
+held-out genotypes 尚未确定，或同一 genotype 重复出现。
+
+### Step 3 — Run the raw-file gate
+
+**Input**
+
+```text
+$INPUT_MANIFEST and every path referenced by it
+```
+
+**Command**
+
+```bash
+set -euo pipefail
+expected_header=$'genotype\tfasta\tgenes_gff3\tte_gff3\tsplit'
+[[ "$(head -n 1 "$INPUT_MANIFEST")" == "$expected_header" ]]
+[[ "$(tail -n +2 "$INPUT_MANIFEST" | sed '/^[[:space:]]*$/d' | wc -l)" -eq 26 ]]
+
+while IFS=$'\t' read -r genotype fasta genes_gff3 te_gff3 split; do
+  [[ -n "$genotype" ]] || continue
+  required=("$fasta" "$fasta.fai" "$genes_gff3" "$te_gff3")
+  [[ "$fasta" == *.gz ]] && required+=("$fasta.gzi")
+  for path in "${required[@]}"; do
+    [[ -s "$path" ]] || { echo "MISSING: $genotype $path" >&2; exit 1; }
+  done
+done < <(tail -n +2 "$INPUT_MANIFEST")
+
+echo "RAW FILE GATE PASSED"
+```
+
+**Expected output**
+
+```text
+RAW FILE GATE PASSED
+```
+
+**Pass condition**
+
+命令返回 0，所有 26 行文件和压缩 FASTA 索引都存在。
+
+**Do not continue if**
+
+出现任何 `MISSING`。该 gate 只检查路径；FASTA alphabet、GFF3 坐标和 region class 完整性由下一步 builder 严格检查。
+
+### Step 4 — Build schema-v3 candidates
+
+**Input**
+
+```text
+$INPUT_MANIFEST
+```
+
+**Command**
+
+```bash
+python scripts/build_onemaize_regions.py \
+  --input-manifest "$INPUT_MANIFEST" \
+  --output-dir "$ONEMAIZE_DATA_DIR" \
+  --primary-context 8192 \
+  --extended-context 16384 \
+  --candidate-span 32768 \
+  --candidate-stride 16384 \
+  --gene-flank 5000 \
+  --repeat-threshold 0.5 \
+  --max-n-fraction 0.10 \
+  --formal \
+  | tee "$ONEMAIZE_ROOT/metadata/nam26_build.log"
+```
+
+首次构建时 output directory 必须不存在。只有明确要替换旧 metadata 时才添加 `--overwrite`。
+
+**Expected output**
+
+```text
+$ONEMAIZE_DATA_DIR/manifest.json
+$ONEMAIZE_DATA_DIR/genomes.parquet
+$ONEMAIZE_DATA_DIR/regions.parquet
+$ONEMAIZE_DATA_DIR/DATA_STATS.md
+```
+
+`manifest.json` 的 `schema_version` 应为 3。
+
+**Pass condition**
+
+- `genotype_count == 26`
+- `genotype_split_counts == {train: 23, val: 1, test: 2}`
+- `formal_split_validated == true`
+- `expected_genotype_panel_validated == true`
+- `required_train_genotypes` 包含 B73
+- 每个 represented genotype/split 都有 gene-centered、non-repeat、TE-rich 三类候选
+- FASTA alphabet audit 通过，无非 `A/C/G/T/N` 字符
+
+**Do not continue if**
+
+builder 报 chromosome/seqid mismatch、GFF3 malformed、缺少 region class、N 比例问题或 panel/split 错误。builder 使用临时目录并在成功后原子发布输出；失败时不要手工拼接不完整 parquet。
+
+### Step 5 — Validate schema-v3 reads at both lengths
+
+**Input**
+
+```text
+$ONEMAIZE_DATA_DIR/{manifest.json,genomes.parquet,regions.parquet}
+26 indexed FASTA files
+```
+
+**Command**
+
+```bash
+export RUN_ROOT="$ONEMAIZE_ROOT/runs/nam26_preflight"
+export REQUIRE_FORMAL=1
+bash scripts/run_onemaize_h200.sh validate
+```
+
+该 stage 不需要 GPU；它分别调用 `validate_onemaize_data.py` 验证 8K 和 16K random access、50/30/20 sampling、MLM masking 和 formal metadata gate。
+
+**Expected output**
+
+```text
+$RUN_ROOT/validate/validation_8k.json
+$RUN_ROOT/validate/validation_16k.json
+```
+
+**Pass condition**
+
+命令返回 0；两个 JSON 均包含 26 genotypes 和 train/val/test 三个 split，抽样比例在默认容差内，读取长度分别为 8,192 和 16,384。
+
+**Do not continue if**
+
+任何 FASTA fetch、schema、split、sampling fraction 或 MLM check 失败。
+
+### Step 6 — Audit 16K candidate compatibility
+
+**Input**
+
+```text
+$ONEMAIZE_DATA_DIR/regions.parquet
+```
+
+**Command**
+
+```bash
+python scripts/audit_onemaize_phase2_candidate_lengths.py \
+  --data-dir "$ONEMAIZE_DATA_DIR" \
+  --context-length 16384 \
+  --output-md "$ONEMAIZE_DATA_DIR/phase2_16k_candidate_audit.md"
+```
+
+**Expected output**
+
+```text
+$ONEMAIZE_DATA_DIR/phase2_16k_candidate_audit.md
+```
+
+**Pass condition**
+
+表格中 `all.short == 0`，且三种 region class 的总数均大于 0。
+
+**Do not continue if**
+
+任何 candidate 小于 16,384 bp。当前审计脚本的结论句仍写作 B73，但数值会统计传入 metadata 的全部行；对 NAM26 应以表格中的 `short` 数值为 gate。
+
+## Phase I — exhaustive 8K full-genome MLM (B73 only)
+
+> Phase I guarantees B73 sequence coverage by deterministic genome slicing rather than probabilistic candidate sampling.
+
+当前 production Phase-I 不读取 `regions.parquet`，只读取 B73 fixed-window parquet。它不等价于旧的 100,000 random windows/epoch。
+
+### 1 — Build manifest
+
+**Input**：B73 BGZF FASTA、同名 `.fai/.gzi`。
+
+**Command**
+
+```bash
+python scripts/build_b73_phase1_8k_manifest.py \
+  --fasta "$ONEMAIZE_B73_FASTA" \
+  --output "$ONEMAIZE_PHASE1_MANIFEST" \
+  --genotype B73 \
+  --chromosomes chr1 chr2 chr3 chr4 chr5 chr6 chr7 chr8 chr9 chr10 \
+  --window-size 8192 \
+  --stride 8192
+```
+
+**Expected output**：`$ONEMAIZE_PHASE1_MANIFEST`。
+
+**Pass condition**：stdout 报告 260,239 keep/PAD windows、10 tail windows、coverage 1.0。
+
+**Do not continue if**：B73 主染色体不是 `chr1`–`chr10`、总 bp 与 B73 v5 审计不符，或 output 已存在但来源不明确。
+
+### 2 — Validate manifest and slicing statistics
+
+**Command**
+
+```bash
+python scripts/validate_b73_phase1_8k_manifest.py \
+  --manifest "$ONEMAIZE_PHASE1_MANIFEST" \
+  --fasta "$ONEMAIZE_B73_FASTA" \
+  | tee "$ONEMAIZE_PHASE1_DIR/validation.json"
+
+python scripts/stat_b73_8192_full_genome_slicing.py \
+  --fasta "$ONEMAIZE_B73_FASTA" \
+  --output-md "$ONEMAIZE_PHASE1_DIR/slicing_stats.md" \
+  --output-csv "$ONEMAIZE_PHASE1_DIR/slicing_stats.csv"
+```
+
+**Expected output**：validation JSON、slicing Markdown/CSV 和 manifest parquet。
+
+**Pass condition**：
+
+| Metric | Expected B73 v5 value |
+| --- | ---: |
+| chr1–chr10 bp | 2,131,846,805 |
+| full 8,192-bp windows | 260,229 |
+| tail windows | 10 |
+| total sequences | 260,239 |
+| tail valid bp | 50,837 |
+| padded bp | 31,083 |
+| valid-bp coverage | 100% |
+
+**Do not continue if**：validator 返回非 0、存在 overlap/gap、tail/padding 不一致或 FASTA/manifest 长度不一致。
+
+### 3 — Benchmark on the target node
+
+**Command**
+
+```bash
+export RUN_ROOT="$PHASE1_RUN_ROOT"
+export NUM_DEVICES=8
+export BATCH_SIZE=1
+export NUM_WORKERS=8
+export BENCHMARK_WARMUP_STEPS=5
+export BENCHMARK_STEPS=100
+export BENCHMARK_IO_STEPS=32
+
+sbatch --export=ALL,STAGE=benchmark \
+  slurm_scripts/run_onemaize_phase1_h200.slurm
+```
+
+交互式单 GPU 节点可用：
+
+```bash
+NUM_DEVICES=1 bash scripts/run_onemaize_phase1_h200.sh benchmark
+```
+
+**Expected output**：`$PHASE1_RUN_ROOT/benchmark.json`。
+
+重点读取以下字段：
+
+- `mean_step_seconds_max_rank`
+- `global_samples_per_second`
+- `global_tokens_per_second`
+- `estimated_epoch_seconds`
+- `io.tokens_per_second`
+- `losses`
+
+Phase-I benchmark 当前不记录 peak GPU memory；显存应在 smoke 阶段使用 `nvidia-smi` 监控。
+
+**Pass condition**：loss 全部有限，8 个 rank 正常结束，吞吐和 I/O 字段为正。
+
+**Do not continue if**：出现 NaN/Inf、CUDA/Mamba kernel error、I/O 明显停滞或 rank failure。
+
+### 4 — Eight-GPU smoke test
+
+**Command**
+
+```bash
+export RUN_ROOT="$PHASE1_RUN_ROOT"
+export NUM_DEVICES=8
+export BATCH_SIZE=1
+export BATCH_SIZE_EVAL=1
+export NUM_WORKERS=8
+export SMOKE_STEPS=20
+export SMOKE_WARMUP_STEPS=2
+
+sbatch --export=ALL,STAGE=smoke \
+  slurm_scripts/run_onemaize_phase1_h200.slurm
+```
+
+**Expected output**：`$PHASE1_RUN_ROOT/smoke/console.log` 和 Slurm stdout/stderr。smoke launcher 会关闭完整周期 checkpoint。
+
+**Pass condition**：8 ranks 正常启动；无 NCCL hang、OOM、NaN/Inf 或 traceback；train loss 有下降趋势；GPU 利用率合理。
+
+**Do not continue if**：任一 rank 失败，或实际输入不是 8,192 tokens。
+
+### 5 — Freeze epoch and train
+
+> **Phase-I epoch is not a virtual random epoch. One epoch corresponds to one full pass over the fixed full-genome manifest.**
+
+B73 有 260,239 unique slices。`DistributedSampler(drop_last=False)` 在 world size 8 时：
+
+```text
+per rank              = ceil(260239 / 8) = 32,530 samples
+global sampler draws  = 32,530 × 8       = 260,240
+unique slices         = 260,239
+padding duplicate     = 1
+```
+
+Phase-I launcher 固定 `accumulate_grad_batches=1`。步数公式为：
+
+```text
+optimizer steps per epoch = ceil(32,530 / batch_size_per_gpu)
+```
+
+先完成 benchmark；未测得目标 8×H200 吞吐前，不要冻结正式 `MAX_STEPS`。以下仅是 `BATCH_SIZE=1` 的一个完整 B73 epoch：
+
+```bash
+export RUN_ROOT="$PHASE1_RUN_ROOT"
+export NUM_DEVICES=8
+export BATCH_SIZE=1
+export BATCH_SIZE_EVAL=1
+export NUM_WORKERS=8
+export MAX_STEPS=32530
+export WARMUP_STEPS=1626
+export CHECKPOINT_INTERVAL=2000
+
+df -h "$RUN_ROOT"
+sbatch --export=ALL,STAGE=train \
+  slurm_scripts/run_onemaize_phase1_h200.slurm
+```
+
+**Expected output**
+
+```text
+$PHASE1_RUN_ROOT/train/console.log
+$PHASE1_RUN_ROOT/train/checkpoints_best/val_loss.ckpt
+$PHASE1_RUN_ROOT/train/checkpoints_resume/last.ckpt
+```
+
+**Pass condition**：validation loss 有限；checkpoint 持续更新；完整 epoch 后 coverage metrics 接近：
+
+```text
+train/phase1_unique_regions = 260239
+train/phase1_genomic_bp_coverage = 1.0
+```
+
+1 个 DDP padding duplicate 是预期行为，不代表额外 genomic coverage。
+
+**Do not continue if**：coverage 不完整、checkpoint 停止更新、磁盘空间不足或 validation loss 数值异常。
+
+### 6 — Resume exact Phase-I state
+
+```bash
+export RUN_ROOT="$PHASE1_RUN_ROOT"
+export RESUME_CKPT="$PHASE1_RUN_ROOT/train/checkpoints_resume/last.ckpt"
+export MAX_STEPS=32530
+export WARMUP_STEPS=1626
+
+sbatch --export=ALL,STAGE=train \
+  slurm_scripts/run_onemaize_phase1_h200.slurm
+```
+
+`MAX_STEPS` 是最终目标 global step，不是追加步数。`RESUME_CKPT` 恢复 model、optimizer、scheduler 和 global step。
+
+### 7 — Evaluate the Phase-I checkpoint
+
+```bash
+unset RESUME_CKPT
+export RUN_ROOT="$PHASE1_RUN_ROOT"
+export EVAL_CKPT="$PHASE1_RUN_ROOT/train/checkpoints_best/val_loss.ckpt"
+
+sbatch --export=ALL,STAGE=test \
+  slurm_scripts/run_onemaize_phase1_h200.slurm
+```
+
+该 test 是 B73 fixed-manifest 的确定性技术检查，不是 genotype-held-out population evaluation。
+
+## Phase II — 16K annotation-aware context adaptation (NAM26)
+
+Phase-II 不是从头训练。`INIT_CKPT` 通过 `train.pretrained_model_path` 严格加载 Phase-I model state，并建立新的 Phase-II optimizer/scheduler；`RESUME_CKPT` 则恢复已经开始的 Phase-II 完整训练状态。两者不能同时设置。
+
+Phase-II region sampling：
+
+```text
+gene GFF3 -> protein-coding gene ±5 kb -> gene-centered
+TE GFF3   -> merged union coverage     -> non-repeat / TE-rich
+                                              |
+uniform genotype -> class 50/30/20 -> candidate -> random 16K crop -> MLM
+```
+
+当前 `scripts/run_onemaize_h200.sh 16k` 实际调用 `configs/experiment/onemaize_b73_16k.yaml`。虽然配置名含 `b73`，dataset 从 `$ONEMAIZE_DATA_DIR` 读取 formal NAM26 schema-v3；launcher 不调用新增的 `onemaize_b73_phase2_16k_region_aware.yaml`。两份 Phase-II config 的 optimizer/accumulation defaults 不完全相同，因此正式实验必须按 launcher 的实际命令归档配置，不能把另一份 YAML 当成已运行配置。
+
+### 1 — Single-H200 16K benchmark
+
+**Prerequisites**：formal validation 通过，candidate audit `short=0`。
+
+```bash
+export RUN_ROOT="$PHASE2_RUN_ROOT"
+mkdir -p "$RUN_ROOT"
+
 CUDA_VISIBLE_DEVICES=0 python scripts/benchmark_onemaize.py \
   --data-dir "$ONEMAIZE_DATA_DIR" \
   --context-length 16384 \
@@ -443,109 +770,210 @@ CUDA_VISIBLE_DEVICES=0 python scripts/benchmark_onemaize.py \
   --steps 10 \
   --io-steps 32 \
   --num-workers 8 \
-  --output-json "$RUN_ROOT/benchmark_16k_h200.json"
+  --output-json "$RUN_ROOT/benchmark_16k_single_h200.json"
 ```
 
-如果 OOM，先保持 `batch-size=1`，再检查实现和显存碎片；不要通过减少层数或 hidden size 改变正式模型定义。
+**Expected output**：`$PHASE2_RUN_ROOT/benchmark_16k_single_h200.json`，包含 input-pipeline throughput、forward/backward/step time、peak allocated/reserved memory、loss 和 parameter count。
 
-### 7.6 8 卡 Phase II smoke test
+**Pass condition**：`parameter_target_met=true`、loss 全部有限、batch 1 不 OOM。
 
-Phase II 从 Phase I 的最佳 checkpoint 初始化。`INIT_CKPT` 表示阶段迁移，只加载模型权重并开始新的训练状态：
+当前仓库没有专门的 **distributed 8×H200 Phase-II benchmark JSON** 入口；8 卡吞吐需通过下一步短 `STAGE=16k` 作业的日志实测。
+
+### 2 — Eight-GPU Phase-II smoke
 
 ```bash
-export INIT_CKPT=/shared/onemaize/runs/phase1_b73_8k_production/train/checkpoints_best/val_loss.ckpt
-export RUN_ROOT=/shared/onemaize/runs/phase2_nam26_smoke
+export RUN_ROOT="$PHASE2_RUN_ROOT"
+export INIT_CKPT="$PHASE1_RUN_ROOT/train/checkpoints_best/val_loss.ckpt"
+unset RESUME_CKPT EVAL_CKPT
 export NUM_DEVICES=8
 export BATCH_SIZE=1
 export BATCH_SIZE_EVAL=1
+export GRAD_ACCUM=1
 export NUM_WORKERS=8
+export TRAIN_SAMPLES_PER_EPOCH=100000
+export VAL_SAMPLES_PER_EPOCH=2048
+export TEST_SAMPLES_PER_EPOCH=2048
 export MAX_STEPS=20
 export WARMUP_STEPS=2
 export CHECKPOINT_INTERVAL=20
 export REQUIRE_FORMAL=1
 
+df -h "$RUN_ROOT"
 sbatch --export=ALL,STAGE=16k \
   slurm_scripts/run_onemaize_h200.slurm
 ```
 
-必须确认加载 checkpoint 时不存在关键参数缺失、shape mismatch 或意外重初始化，并检查 16K 下的 loss、吞吐、显存和 NCCL 状态。
-
-### 7.7 冻结 Phase II 正式预算
-
-Phase II 使用动态 region-aware 采样，没有与 Phase I 相同的固定“全基因组 epoch”。预算用总 optimizer steps 表示：
+**Expected output**
 
 ```text
-global_batch = GPU 数 × 每卡 batch × accumulate_grad_batches
-total_sequences = MAX_STEPS × global_batch
-total_tokens = total_sequences × 16384
-平均每个 train genotype 的抽样数 ≈ total_sequences / 23
+$PHASE2_RUN_ROOT/16k/run_manifest.txt
+$PHASE2_RUN_ROOT/16k/console.log
+$PHASE2_RUN_ROOT/16k/checkpoints_best/
+$PHASE2_RUN_ROOT/16k/checkpoints_resume/
 ```
 
-推荐先根据 16K benchmark 计算预计时长，再冻结 `MAX_STEPS`、warmup 和 checkpoint 间隔。正式提交示例：
+**Pass condition**：Phase-I state strict-load 成功，无 missing key/shape mismatch；8 ranks 正常；16K loss 有限；无 OOM/NCCL hang；日志记录实际 global batch 和 context。
+
+**Do not continue if**：checkpoint 加载失败、formal gate 失败、任何 rank 失败或磁盘不足。该 launcher 会保存 checkpoint；smoke 前也要确认空间。
+
+### 3 — Freeze the Phase-II budget and train
+
+Phase-II 是 virtual random epoch，默认 `TRAIN_SAMPLES_PER_EPOCH=100000`；它与 Phase-I full-manifest epoch 无关。
+
+```text
+global batch = NUM_DEVICES × BATCH_SIZE × GRAD_ACCUM
+optimizer steps per virtual epoch = ceil(TRAIN_SAMPLES_PER_EPOCH / global batch)
+total sampled sequences = MAX_STEPS × global batch
+total model tokens = total sampled sequences × 16384
+```
+
+根据 single-H200 benchmark 和 8-card smoke 冻结以下变量后再提交：
 
 ```bash
-export RUN_ROOT=/shared/onemaize/runs/phase2_nam26_production
-export INIT_CKPT=/shared/onemaize/runs/phase1_b73_8k_production/train/checkpoints_best/val_loss.ckpt
-export NUM_DEVICES=8
-export BATCH_SIZE=1
-export BATCH_SIZE_EVAL=1
-export NUM_WORKERS=8
-export MAX_STEPS=<根据benchmark确定>
-export WARMUP_STEPS=<通常为MAX_STEPS的约5%>
-export CHECKPOINT_INTERVAL=<根据队列时限和磁盘确定>
+read -r -p "Approved Phase-II MAX_STEPS: " MAX_STEPS
+read -r -p "Approved Phase-II WARMUP_STEPS: " WARMUP_STEPS
+read -r -p "Approved CHECKPOINT_INTERVAL: " CHECKPOINT_INTERVAL
+[[ "$MAX_STEPS" =~ ^[1-9][0-9]*$ ]]
+[[ "$WARMUP_STEPS" =~ ^[0-9]+$ ]]
+[[ "$CHECKPOINT_INTERVAL" =~ ^[1-9][0-9]*$ ]]
+(( WARMUP_STEPS < MAX_STEPS ))
+export MAX_STEPS WARMUP_STEPS CHECKPOINT_INTERVAL
+: "${INIT_CKPT:?Set the Phase-I best checkpoint}"
+
+export RUN_ROOT="$PHASE2_RUN_ROOT"
 export REQUIRE_FORMAL=1
-
 sbatch --export=ALL,STAGE=16k \
   slurm_scripts/run_onemaize_h200.slurm
 ```
 
-### 7.8 Phase II 断点续训和测试
-
-断点续训使用 `RESUME_CKPT`，它恢复模型、optimizer、scheduler 和 global step。恢复时不要同时设置 `INIT_CKPT`：
+### 4 — Resume exact Phase-II state
 
 ```bash
-unset INIT_CKPT
-export RESUME_CKPT="$RUN_ROOT/16k/checkpoints_resume/last.ckpt"
+unset INIT_CKPT EVAL_CKPT
+export RESUME_CKPT="$PHASE2_RUN_ROOT/16k/checkpoints_resume/last.ckpt"
+export RUN_ROOT="$PHASE2_RUN_ROOT"
 
 sbatch --export=ALL,STAGE=16k \
   slurm_scripts/run_onemaize_h200.slurm
 ```
 
-held-out genotype 测试：
+保持正式实验原来的 `MAX_STEPS`、`WARMUP_STEPS`、batch、gradient accumulation 和 data directory。不要同时设置 `INIT_CKPT`。
+
+### 5 — Validation and held-out test
+
+训练期间 model selection 使用 formal validation genotype。最终 test：
 
 ```bash
 unset INIT_CKPT RESUME_CKPT
-export EVAL_CKPT="$RUN_ROOT/16k/checkpoints_best/val_loss.ckpt"
+export RUN_ROOT="$PHASE2_RUN_ROOT"
+export EVAL_CKPT="$PHASE2_RUN_ROOT/16k/checkpoints_best/val_loss.ckpt"
+export REQUIRE_FORMAL=1
 
 sbatch --export=ALL,STAGE=test16k \
   slurm_scripts/run_onemaize_h200.slurm
 ```
 
-## 8. 当前实测结果
+**Expected output**：`$PHASE2_RUN_ROOT/test16k/run_manifest.txt` 和 `test.log`。
 
-### 8.1 Phase I B73 全基因组切片
+**Pass condition**：test 只读取 TSV 中冻结的 2 个 test genotypes；无 train genotype 混入；指标有限且 checkpoint 与 run manifest 对应。
 
-当前 B73 FASTA 已完成固定窗口构建和逐坐标核验：260,239 条序列覆盖 chr1–10 的 2,131,846,805 个有效 bp，覆盖率为 100%。保留 10 个尾部窗口后需要 31,083 个 PAD token；若直接丢弃尾部，则为 260,229 条序列，覆盖率约 99.9976%。详细统计见：
+## Pre-flight checklist
 
-- `B73_8192_FULL_GENOME_SLICING_STATS.md`
-- `B73_8192_FULL_GENOME_SLICING_STATS.csv`
+正式训练前逐项确认：
 
-### 8.2 单张 A100 80GB smoke 和吞吐
+- [ ] exact 26-genotype panel present
+- [ ] final 23/1/2 split frozen
+- [ ] B73 assigned to train
+- [ ] every FASTA/FAI/GZI present and matched
+- [ ] every gene GFF3 and TE GFF3 present
+- [ ] chromosome/seqid names consistent
+- [ ] schema-v3 build completed with `--formal`
+- [ ] `validation_8k.json` and `validation_16k.json` passed
+- [ ] all genotype/class pools present
+- [ ] TE union-coverage classification audited
+- [ ] Phase-II candidate audit reports `short=0`
+- [ ] B73 Phase-I manifest validation passed
+- [ ] Phase-I target-node benchmark completed
+- [ ] 8×H200 Phase-I smoke passed
+- [ ] Phase-I best checkpoint exists
+- [ ] single-H200 16K benchmark completed
+- [ ] 8×H200 Phase-II smoke passed
+- [ ] output/checkpoint filesystem has sufficient free space
+- [ ] final `MAX_STEPS`, warmup, batch and checkpoint interval frozen
 
-在完整 24 层、hidden size 864、8,192 token、BF16、batch size 1 的配置下：
+> **任一必要项未通过，不要启动对应阶段的正式训练。**
 
-- 20-step smoke test 的 train loss 约从 5.10 降至 2.03。
-- A100 短 benchmark 平均约 0.441 秒/step。
-- 吞吐约 2.27 sequences/s，约 18,564 tokens/s。
-- 按单卡、batch size 1 的短 benchmark 线性估算，完整遍历 260,239 条序列约需 31.9 小时。
+通用磁盘检查：
 
-该时间只用于量级参考。8×H200 的实际耗时必须在对应节点完成 benchmark 后重新计算，因为分布式通信、I/O、验证和 checkpoint 写入都会影响总时间。
+```bash
+df -h "$ONEMAIZE_ROOT"
+du -sh "$ONEMAIZE_ROOT"/runs "$ONEMAIZE_ROOT"/runs/*/checkpoints* 2>/dev/null || true
+```
 
-### 8.3 早期 B73 region-aware 训练记录
+## Expected outputs
 
-项目早期曾使用 B73 region-aware 8K 数据完成 7 个 epoch，用于证明代码、模型和 loss 链路可以稳定运行：
+| Stage | Files actually produced by current code |
+| --- | --- |
+| NAM26 region build | `manifest.json`, `genomes.parquet`, `regions.parquet`, `DATA_STATS.md` |
+| NAM26 validation | `validate/validation_8k.json`, `validate/validation_16k.json` |
+| Candidate audit | `phase2_16k_candidate_audit.md` |
+| Phase-I index | B73 fixed-window parquet, validation JSON, optional slicing MD/CSV |
+| Phase-I benchmark | `benchmark.json` |
+| Phase-I train | `train/console.log`, `train/checkpoints_best/`, `train/checkpoints_resume/` |
+| Phase-II benchmark | `benchmark_16k_single_h200.json` |
+| Phase-II train | `16k/run_manifest.txt`, `16k/console.log`, best/resume checkpoint directories |
+| Phase-II test | `test16k/run_manifest.txt`, `test16k/test.log` |
 
-| epoch | global step | 末段 train loss | val loss | 耗时 |
+原始 FASTA、annotation 和 checkpoints 不提交 Git。正式归档至少包括 Git commit、冻结 TSV、schema-v3 metadata、完整 Hydra config、Slurm job ID、benchmark JSON、console log、best/last checkpoint、split 和 validation/test 指标。
+
+## B73 validated results
+
+### Current deterministic Phase-I
+
+真实 B73 v5 chr1–chr10 审计结果：
+
+| Metric | Result |
+| --- | ---: |
+| genomic bp | 2,131,846,805 |
+| full windows | 260,229 |
+| tail windows | 10 |
+| total keep/PAD sequences | 260,239 |
+| padding | 31,083 bp |
+| valid-bp coverage | 100% |
+
+单张 A100 80GB、BF16、batch 1 的已记录结果：
+
+- 20-step smoke train loss 约从 5.10 降至 2.03；无 NaN/Inf。
+- 2 warmup + 10 measured steps：0.441 s/step。
+- 2.27 sequences/s；18,564 tokens/s。
+- 线性估算完整 B73 full-manifest epoch 约 31.9 h。
+
+这些是 A100 参考，不是 8×H200 实测。证据见：
+
+- [`docs/audits/onemaize_b73/PHASE1_FULL_GENOME_VALIDATION.md`](docs/audits/onemaize_b73/PHASE1_FULL_GENOME_VALIDATION.md)
+- [`docs/audits/onemaize_b73/PHASE1_A100_BENCHMARK.json`](docs/audits/onemaize_b73/PHASE1_A100_BENCHMARK.json)
+- [`B73_8192_FULL_GENOME_SLICING_STATS.md`](B73_8192_FULL_GENOME_SLICING_STATS.md)
+
+### Phase-II candidate compatibility
+
+B73 schema-v3 metadata 的 16K candidate audit：
+
+| Class | Count | Shorter than 16K |
+| --- | ---: | ---: |
+| gene-centered | 39,021 | 0 |
+| non-repeat | 143 | 0 |
+| TE-rich | 124,986 | 0 |
+| total | 164,150 | 0 |
+
+该结果只证明 B73 candidates 可提供 16K crop，不证明 NAM26 已完成。证据见 [`docs/audits/onemaize_b73/PHASE2_16K_CANDIDATE_LENGTH_AUDIT.md`](docs/audits/onemaize_b73/PHASE2_16K_CANDIDATE_LENGTH_AUDIT.md)。
+
+## Historical B73 pilot results
+
+> These results were produced before the deterministic full-genome Phase-I design was adopted. They validate the model/data stack but do not define the current Phase-I epoch semantics.
+
+旧 B73 region-aware 8K pilot 使用 100,000 random windows/epoch，在单张 A100 上每个虚拟 epoch 约 6 小时：
+
+| epoch | global step | train loss | val loss | elapsed |
 | ---: | ---: | ---: | ---: | ---: |
 | 0 | 25,000 | 1.080 | 1.09709 | 6:00:18 |
 | 1 | 50,000 | 0.901 | 1.00976 | 6:01:42 |
@@ -555,85 +983,108 @@ sbatch --export=ALL,STAGE=test16k \
 | 5 | 150,000 | 0.670 | 0.89139 | 6:00:12 |
 | 6 | 175,000 | 0.651 | 0.87862 | 6:01:22 |
 
-这组结果对应旧的 region-aware 8K 数据定义，不能当作当前 Phase I 固定全基因组窗口的正式结果，也不能代表 NAM26 跨材料性能。它只说明训练过程稳定、loss 持续下降，并提供 A100 运行时间参考。
+这组时间不能用于宣称当前 full-genome Phase-I 为 6 h/epoch，也不能代表 NAM26 population performance。
 
-### 8.4 Phase II B73 候选区域审计
+## NAM26 status and operational blockers
 
-当前 B73 的 16K 候选区域为：
+NAM26 schema-v3 builder、formal gate、region-aware loader、16K continuation、Slurm training 和 held-out test 入口均已实现并有 synthetic tests；最终 26-genotype 数据尚未正式构建或运行。
 
-| 类型 | 数量 |
-| --- | ---: |
-| gene | 39,021 |
-| TE | 143 |
-| intergenic | 124,986 |
-| 总计 | 164,150 |
+当前限制：
 
-这些候选区域均满足 16,384-bp 动态裁剪要求。正式 Phase II 仍需对全部 26 个材料重新构建并完成相同审计。
+1. **NAM26 Phase-I full-genome training is not implemented.** 当前 production Phase-I validator/config/launcher 是 B73-only；没有 26-genotype fixed-manifest aggregator 或 population Phase-I loader。
+2. **Formal held-out genotypes are not frozen in the repository.** 运行者必须在 `onemaize_26.tsv` 构建前确定 1 val + 2 test。
+3. **No dedicated distributed 8×H200 Phase-II benchmark entry exists.** `benchmark_onemaize.py` 是单进程 benchmark；真实 8 卡吞吐要从短 `STAGE=16k` 作业获得。
+4. **Two Phase-II experiment YAMLs are not wired identically.** H200 launcher 实际调用 `onemaize_b73_16k.yaml`，不是 `onemaize_b73_phase2_16k_region_aware.yaml`；正式记录必须以 launcher 输出的 Hydra config 为准。
+5. `audit_onemaize_phase2_candidate_lengths.py` 的结论文字仍为 B73-specific；用于 NAM26 时数值覆盖全部 metadata，但报告措辞尚未泛化。
 
-## 9. 停止标准与归档
+这些限制不阻止当前已定义的 **B73 Phase-I → NAM26 Phase-II** 流程在数据到位后试运行；但它们阻止将仓库描述为“26 个 genotype 全部完成 exhaustive Phase-I 且已有完整 8×H200 benchmark”。
 
-### 9.1 建议停止的情况
+## Repository map
 
-- 连续 3 个完整验证周期的 val loss 绝对改善均小于约 0.005。
-- 连续 3 个完整验证周期 val loss 回升。
-- 出现持续的 NaN/Inf、数据损坏、checkpoint 无法恢复或无法解释的覆盖异常。
-- 磁盘可用空间低于 10 GB。此时应先处理存储，不要继续生成 checkpoint。
+```text
+configs/
+├── dataset/
+│   ├── onemaize_b73_phase1_8k_full_genome.yaml   # B73 fixed-manifest dataset
+│   ├── onemaize_b73_phase2_16k_region_aware.yaml # explicit 16K region dataset
+│   └── onemaize_dna_mlm.yaml                     # schema-v3 region-aware defaults
+└── experiment/
+    ├── onemaize_b73_phase1_8k_full_genome.yaml   # current Phase-I experiment
+    ├── onemaize_b73_16k.yaml                     # config used by H200 16K launcher
+    └── onemaize_b73_phase2_16k_region_aware.yaml # explicit Phase-II config, not launcher default
 
-不要只根据 train loss 判断是否继续；正式判断应以 validation loss、覆盖审计和下游测试为依据。
+scripts/
+├── build_b73_phase1_8k_manifest.py               # B73 fixed 8K index
+├── validate_b73_phase1_8k_manifest.py            # B73 v5 exact validator
+├── stat_b73_8192_full_genome_slicing.py           # B73 slicing MD/CSV
+├── benchmark_b73_phase1_8k.py                     # Phase-I benchmark
+├── run_onemaize_phase1_h200.sh                    # Phase-I stages
+├── build_onemaize_regions.py                      # schema-v3 NAM26 builder
+├── validate_onemaize_data.py                      # region metadata/read validator
+├── audit_onemaize_phase2_candidate_lengths.py     # 16K candidate-length audit
+├── benchmark_onemaize.py                          # single-process region benchmark
+└── run_onemaize_h200.sh                           # formal region-aware H200 stages
 
-### 9.2 每次正式实验应归档
+slurm_scripts/
+├── run_onemaize_phase1_h200.slurm
+└── run_onemaize_h200.slurm
 
-- Git commit hash
-- 数据 manifest、schema 版本和 23/1/2 split
-- 完整 Hydra 配置
-- Slurm 提交脚本和 job ID
-- benchmark JSON
-- console log
-- best checkpoint 和 resume checkpoint
-- validation/test 指标
-- GPU 型号、数量、PyTorch/CUDA/driver 版本
-- 总步数、global batch、总 sequences、总 tokens 和实际运行时长
+src/
+├── onemaize/regions.py                            # schema-v3, TE union, candidate construction
+├── onemaize/phase1_coverage.py                    # fixed-manifest DDP coverage metrics
+├── dataloaders/onemaize_mlm.py                    # Phase-I/Phase-II data module
+└── dataloaders/datasets/
+    ├── onemaize_phase1_dataset.py                 # fixed B73 windows and tail PAD
+    └── onemaize_dataset.py                        # 50/30/20 dynamic region sampler
 
-数据文件和 checkpoint 不提交到 GitHub；GitHub 只保存代码、配置、操作说明和小型审计报告。
+docs/audits/onemaize_b73/                          # real B73 validation evidence
+```
 
-## 10. 常见问题
+## Troubleshooting
 
-### 10.1 缺少 `.fai` 或 `.gzi`
+### Missing `.fai`
 
-当前 dataset 需要对 BGZF FASTA 做随机访问。FASTA、`.fai` 和 `.gzi` 必须来自同一个文件版本，不能混用重新压缩前后的索引。
+对 BGZF FASTA 执行 `samtools faidx genome.fa.gz`。若 `.fai` 来自另一文件版本，删除错误索引后用当前 FASTA 重建；不要混用不同下载或重新压缩版本。
 
-### 10.2 GFF3 seqid 不存在于 FASTA
+### Missing `.gzi`
 
-先比较 FASTA contig 名与 GFF3 第一列。不要静默丢弃无法映射的 annotation；应显式建立映射或更换匹配的 annotation 版本。
+确认文件是 BGZF。对 plain FASTA 用 `bgzip` 重新压缩后执行 `samtools faidx`。普通 gzip 不能替代 BGZF random access。
 
-### 10.3 `--formal` 拒绝 manifest
+### Chromosome naming mismatch (`chr1` vs `1`)
 
-检查是否恰好 26 个指定材料、是否为 23/1/2、B73 是否在 train、每个材料的 FASTA/索引/GFF3 是否都可读。修正输入后重新构建 metadata。
+默认 `--seqid-regex` 只接收 `chr1`–`chr10`。优先使用 FASTA 与 annotation 匹配的官方版本；如果材料确实采用另一套一致命名，可在 region builder 中显式传入经过审查的 `--seqid-regex`。B73 exact Phase-I validator 仍固定要求 `chr1`–`chr10`。
 
-### 10.4 H200 上找不到 Mamba CUDA kernel
+### Schema validation failure
 
-确认当前 shell 激活的是安装了项目依赖的环境，并检查 `torch`、CUDA runtime、驱动及 `mamba-ssm`/`causal-conv1d` 的 ABI 是否匹配。环境变化后先重新运行 benchmark。
+检查 TSV header、26 个标准名称、23/1/2 split、B73=train、`--formal`、三个 parquet/JSON 文件和 FASTA indexes。不要用 `REQUIRE_FORMAL=0` 绕过正式训练 gate。
 
-### 10.5 NCCL hang
+### Candidate shorter than 16K
 
-检查每个 rank 的日志、`CUDA_VISIBLE_DEVICES`、Slurm task 数和网卡配置。Phase I Slurm 模板一次提交 8 个 task，启动器会在 allocation 内创建对应的 `srun` step。
+停止 Phase-II。先确认 chromosome lengths、gene coordinates 和 builder 参数。当前 loader 会拒绝 split 中最短 candidate 小于 context length；不要静默降低 context 或改变 50/30/20 权重。
 
-### 10.6 CUDA OOM
+### GFF3 or TE coverage failure
 
-先使用每卡 batch size 1；若仍 OOM，检查是否有其他进程占用显存、序列长度是否正确以及 kernel 是否退化。不要为通过 smoke test 而修改正式模型层数或 hidden size。
+当前 parser 要求 9-column GFF3。gene 只读取 `feature_type=gene`；TE intervals 按 1-based inclusive 输入转换为 0-based half-open 后做 union。先修复 malformed rows 和 seqid mapping，再重建整个 output directory。
 
-### 10.7 checkpoint 占满磁盘
+### CUDA/Mamba kernel failure
 
-降低保存频率，只保留最优 checkpoint、`last.ckpt` 和少量关键里程碑。删除前先确认文件可恢复且不属于正在运行的任务。
+重新确认 Python 3.10、PyTorch 2.2.0、CUDA runtime、driver、`mamba-ssm==1.2.2` 和 `causal-conv1d==1.2.0.post2` ABI。运行环境 import gate 和小 benchmark；不要把当前实现误换成 Mamba2 来绕过错误。
 
-## 11. 尚未完成的正式工作
+### CUDA OOM
 
-1. 收集并校验 26 个材料的 FASTA、索引、gene GFF3 和 TE GFF3。
-2. 冻结 Phase II 的 23/1/2 genotype split。
-3. 在目标 8×H200 节点运行 Phase I benchmark 和 smoke test，确定正式 batch size 与吞吐。
-4. 完成当前 Phase I 固定全基因组 8K 正式训练并归档 best checkpoint。
-5. 构建、校验和审计 NAM26 Phase II metadata。
-6. 在目标节点完成 16K benchmark 与 smoke test，冻结 Phase II 总训练预算。
-7. 从 Phase I best checkpoint 初始化 Phase II，并完成 held-out genotype 测试。
+先保持 `BATCH_SIZE=1`，检查其他 GPU 进程和实际 context length。通过 `GRAD_ACCUM` 调整 Phase-II effective batch；Phase-I launcher 当前固定 accumulation=1。不要缩小正式模型层数或 hidden size 来伪造 production smoke 通过。
 
-在以上步骤完成前，可以确认“代码和单材料数据链路已经跑通”，但不应表述为“26 材料完整训练已经完成”。
+### NCCL hang
+
+两个 Slurm 模板均请求 8 tasks/8 GPUs；应直接 `sbatch` 模板，不要在外层再加 `srun`。检查 Slurm stdout 中 rank、visible GPU、node 和 NCCL 错误。
+
+### Disk full
+
+训练前运行 `df -h` 和 `du -sh`。降低 `CHECKPOINT_INTERVAL` 的频率值含义是增大步数间隔；至少保留 best checkpoint 和 `last.ckpt`。不要在作业写入期间删除 checkpoint。
+
+### Checkpoint continuation or resume
+
+- Phase-I → Phase-II：使用 `INIT_CKPT`，开始新的 optimizer/scheduler。
+- 同一阶段中断恢复：使用 `RESUME_CKPT`，恢复完整状态。
+- 评估：清空前两者并使用 `EVAL_CKPT`。
+
+三种变量不要混用。launcher 会拒绝同时设置 `INIT_CKPT` 和 `RESUME_CKPT`。
