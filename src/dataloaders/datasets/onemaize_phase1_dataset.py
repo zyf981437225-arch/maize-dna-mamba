@@ -182,39 +182,85 @@ class OneMaizePhase1FullGenomeMLMDataset(torch.utils.data.Dataset):
         return torch.from_numpy(corrupted), torch.from_numpy(labels)
 
     def __getitem__(self, index: int):
-        index = int(index)
-        if index < 0:
-            index += len(self)
-        if index < 0 or index >= len(self):
-            raise IndexError(index)
+    index = int(index)
+    if index < 0:
+        index += len(self)
+    if index < 0 or index >= len(self):
+        raise IndexError(index)
+
+    for _ in range(len(self)):
         row = self.rows[index]
-        valid_bp, padded_bp = int(row["valid_bp"]), int(row["padded_bp"])
-        sequence = self._fasta_store.fetch(self.genotype, str(row["chromosome"]), int(row["start"]), int(row["end"]))
+        valid_bp = int(row["valid_bp"])
+        padded_bp = int(row["padded_bp"])
+
+        sequence = self._fasta_store.fetch(
+            self.genotype,
+            str(row["chromosome"]),
+            int(row["start"]),
+            int(row["end"]),
+        )
+
         if len(sequence) != valid_bp:
-            raise ValueError(f"Expected {valid_bp} bp, fetched {len(sequence)} for region {index}")
+            raise ValueError(
+                f"Expected {valid_bp} bp, fetched {len(sequence)} for region {index}"
+            )
+
         sequence = sequence.upper()
+
         if set(sequence) - set("ACGTN"):
             raise ValueError(f"Non-ACGTN sequence fetched for region {index}")
-        rng = self._rng_for_index(index)
-        reverse_complemented = bool(rng.random() < self.reverse_complement_probability)
-        if reverse_complemented:
-            sequence = reverse_complement(sequence)
-        raw = np.frombuffer(sequence.encode("ascii"), dtype=np.uint8)
-        real_tokens = self._byte_to_token[raw]
-        if np.any(real_tokens == int(self.tokenizer.unk_token_id)):
-            raise ValueError("Normalized Phase-I sample contains an unknown token")
-        token_ids = np.pad(real_tokens, (0, padded_bp), constant_values=self.pad_id)
-        valid_mask = np.arange(self.context_length) < valid_bp
-        corrupted, labels = self._mask(token_ids, valid_mask, rng)
-        metadata = {
-            "attention_mask": torch.from_numpy(valid_mask.copy()),
-            "valid_mask": torch.from_numpy(valid_mask.copy()),
-            "phase1_region_id": torch.tensor(int(row["region_id"]), dtype=torch.long),
-            "phase1_valid_bp": torch.tensor(valid_bp, dtype=torch.long),
-            "phase1_is_tail": torch.tensor(bool(row["is_tail"]), dtype=torch.bool),
-            "phase1_reverse_complemented": torch.tensor(reverse_complemented, dtype=torch.bool),
-        }
-        return corrupted.long(), labels.long(), metadata
+
+        if any(base in sequence for base in "ACGT"):
+            break
+
+        index = (index + 1) % len(self)
+    else:
+        raise ValueError("No trainable A/C/G/T-containing Phase-I window found")
+
+    rng = self._rng_for_index(index)
+
+    reverse_complemented = bool(
+        rng.random() < self.reverse_complement_probability
+    )
+    if reverse_complemented:
+        sequence = reverse_complement(sequence)
+
+    raw = np.frombuffer(sequence.encode("ascii"), dtype=np.uint8)
+    real_tokens = self._byte_to_token[raw]
+
+    if np.any(real_tokens == int(self.tokenizer.unk_token_id)):
+        raise ValueError("Normalized Phase-I sample contains an unknown token")
+
+    token_ids = np.pad(
+        real_tokens,
+        (0, padded_bp),
+        constant_values=self.pad_id,
+    )
+
+    valid_mask = np.arange(self.context_length) < valid_bp
+
+    corrupted, labels = self._mask(
+        token_ids,
+        valid_mask,
+        rng,
+    )
+
+    metadata = {
+        "attention_mask": torch.from_numpy(valid_mask.copy()),
+        "valid_mask": torch.from_numpy(valid_mask.copy()),
+        "phase1_region_id": torch.tensor(
+            int(row["region_id"]), dtype=torch.long
+        ),
+        "phase1_valid_bp": torch.tensor(valid_bp, dtype=torch.long),
+        "phase1_is_tail": torch.tensor(
+            bool(row["is_tail"]), dtype=torch.bool
+        ),
+        "phase1_reverse_complemented": torch.tensor(
+            reverse_complemented, dtype=torch.bool
+        ),
+    }
+
+    return corrupted.long(), labels.long(), metadata
 
     def __getstate__(self):
         state = self.__dict__.copy()
