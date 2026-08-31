@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 import pytest
+import torch
 
 from caduceus.tokenization_caduceus import CaduceusTokenizer
 from scripts.build_b73_phase1_8k_manifest import build_rows, read_fai, write_parquet
@@ -74,6 +75,41 @@ def test_phase1_dataset_never_crosses_chromosome_and_pads_tail(tmp_path):
     inputs_b, labels_b, metadata_b = dataset[2]
     assert inputs.equal(inputs_b) and labels.equal(labels_b)
     assert metadata_b["phase1_region_id"].item() == 2
+
+
+def test_phase1_dataset_all_n_window_uses_next_canonical_window(tmp_path):
+    fasta = tmp_path / "B73.fa"
+    fai = _write_fasta_with_fai(fasta, [("chr1", "N" * 8 + "ACGT" * 2)])
+    rows = build_rows(read_fai(fai), ("chr1",), fasta, fai, window_size=8, stride=8)
+    manifest = tmp_path / "phase1.parquet"
+    write_parquet(rows, manifest)
+    dataset = OneMaizePhase1FullGenomeMLMDataset(
+        manifest,
+        tokenizer=_tokenizer(),
+        context_length=8,
+        window_size=8,
+        stride=8,
+        fasta_path=fasta,
+        allow_index_build=True,
+        deterministic=True,
+        reverse_complement_probability=0.0,
+    )
+
+    inputs, labels, metadata = dataset[0]
+    repeated_inputs, repeated_labels, repeated_metadata = dataset[0]
+
+    assert dataset.coordinate(0)["region_id"] == 0
+    assert metadata["phase1_region_id"].item() == 1
+    assert repeated_metadata["phase1_region_id"].item() == 1
+    assert inputs.equal(repeated_inputs)
+    assert labels.equal(repeated_labels)
+    assert torch.isfinite(inputs.float()).all()
+    assert torch.isfinite(labels.float()).all()
+
+    vocab_size = max(dataset.tokenizer.get_vocab().values()) + 1
+    logits = torch.zeros((dataset.context_length, vocab_size), dtype=torch.float32)
+    loss = torch.nn.functional.cross_entropy(logits, labels, ignore_index=dataset.pad_id)
+    assert torch.isfinite(loss)
 
 
 def test_phase1_collate_preserves_masks_and_ids(tmp_path):
