@@ -363,6 +363,17 @@ def test_formal_model_b_config_is_schema_v3_region_aware():
 
 def test_population_audit_reports_pool_distribution_without_enforcing_ratio(tmp_path):
     _, output, _ = _write_fixture(tmp_path)
+    index_builder = OneMaizeRegionMLMDataset(
+        output,
+        tokenizer=_Tokenizer(),
+        split="train",
+        context_length=128,
+        samples_per_epoch=1,
+        deterministic=True,
+        allow_index_build=True,
+    )
+    index_builder[0]
+    index_builder.close()
     report, rows = audit_population_metadata(
         output, context_length=128, formal=False, low_pool_warning=10
     )

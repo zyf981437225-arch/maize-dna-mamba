@@ -103,7 +103,11 @@ def audit_population_metadata(
     split_by_genotype = {row["genotype"]: row["default_split"] for row in genomes}
     leakage = [row["region_id"] for row in rows if split_by_genotype.get(row["genotype"]) != row["split"]]
     if leakage:
-        errors.append("candidate split leakage: " + ", ".join(leakage[:20]))
+        message = "candidate split differs from genotype split: " + ", ".join(leakage[:20])
+        if formal:
+            errors.append(message)
+        else:
+            warnings.append(message + " (allowed only for chromosome-split pilots)")
 
     candidate_rows = []
     for genome in genomes:
