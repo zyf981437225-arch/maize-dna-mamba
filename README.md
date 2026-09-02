@@ -1096,7 +1096,7 @@ Only the experimental schema-v4 extension additionally requires:
 - [ ] every event coordinate explicitly mapped to its genotype FASTA
 - [ ] schema-v4 `variant_manifest.json` and `variant_regions.parquet` built
 - [ ] variant audit reports no duplicate ID, out-of-FASTA event or split leakage
-- [ ] every enabled genotype/class pool is non-empty
+- [ ] every enabled variant class has at least one eligible genotype; B73 is not required to have B73-vs-B73 events
 - [ ] sampling probabilities and ablation plan frozen
 
 > **任一必要项未通过，不要启动对应阶段的正式训练。**
