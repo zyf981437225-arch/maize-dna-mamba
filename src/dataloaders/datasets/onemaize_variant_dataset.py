@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -226,6 +227,17 @@ class OneMaizeVariantTEMLMDataset(OneMaizeRegionMLMDataset):
             variant_path,
             columns=["variant_id", "genotype", "coordinate_genotype", "split"],
         ).to_pylist()
+        duplicate_variant_ids = [
+            variant_id
+            for variant_id, count in Counter(
+                row["variant_id"] for row in all_variants
+            ).items()
+            if count > 1
+        ]
+        if duplicate_variant_ids:
+            raise ValueError(
+                "Duplicate variant IDs: " + ", ".join(duplicate_variant_ids[:10])
+            )
         split_by_genotype = {
             row["genotype"]: row["default_split"]
             for row in pq.read_table(

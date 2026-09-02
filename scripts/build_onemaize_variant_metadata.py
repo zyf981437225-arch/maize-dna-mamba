@@ -21,6 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-data-dir", type=Path, required=True)
     parser.add_argument("--input-manifest", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--fasta-root", type=Path)
     parser.add_argument("--overwrite", action="store_true")
     return parser
 
@@ -31,6 +32,7 @@ def main() -> None:
         args.base_data_dir,
         load_variant_inputs(args.input_manifest),
         args.output_dir,
+        fasta_root=args.fasta_root,
         overwrite=args.overwrite,
     )
     print(json.dumps(manifest, indent=2, sort_keys=True))

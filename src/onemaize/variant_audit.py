@@ -108,6 +108,11 @@ def audit_variant_metadata(
     variants = pq.read_table(
         variant_data_dir / variant_manifest["files"]["variants"]
     ).to_pylist()
+    if len(variants) != int(variant_manifest.get("variant_count", len(variants))):
+        errors.append(
+            f"variant row count {len(variants)} does not match manifest "
+            f"{variant_manifest.get('variant_count')}"
+        )
     ids = [row["variant_id"] for row in variants]
     duplicate_ids = sorted(item for item, count in Counter(ids).items() if count > 1)
     if duplicate_ids:
@@ -236,7 +241,8 @@ def audit_variant_metadata(
         "missing_classes": missing_classes,
         "candidate_event_coverage": {
             "audited_events": len(variants),
-            "coordinate_valid_events": len(variants) - len(outside_fasta) - len(leakage),
+            "coordinate_valid_events": len(variants)
+            - len(set(outside_fasta) | set(leakage)),
         },
         "errors": errors,
         "warnings": warnings,

@@ -900,7 +900,8 @@ export ONEMAIZE_VARIANT_DATA_DIR="$ONEMAIZE_ROOT/metadata/nam26_variant_te_v4"
 python scripts/build_onemaize_variant_metadata.py \
   --base-data-dir "$ONEMAIZE_DATA_DIR" \
   --input-manifest "$ONEMAIZE_VARIANT_INPUTS" \
-  --output-dir "$ONEMAIZE_VARIANT_DATA_DIR"
+  --output-dir "$ONEMAIZE_VARIANT_DATA_DIR" \
+  --fasta-root "$ONEMAIZE_FASTA_ROOT"
 ```
 
 输出：`variant_manifest.json` 和 `variant_regions.parquet`。内部坐标只转换一次并统一为 0-based half-open。SNP/small indel 采 event context；超长 SV/PAV 采 left/right breakpoint；TE insertion/deletion 只有在真实 annotation 明确标注后才进入 `te_variant`。

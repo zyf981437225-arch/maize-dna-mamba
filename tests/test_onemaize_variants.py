@@ -12,9 +12,13 @@ from src.dataloaders.datasets.onemaize_variant_dataset import (
     OneMaizeVariantTEMLMDataset,
     crop_for_event,
 )
+from src.dataloaders.onemaize_variant_mlm import OneMaizeVariantTEDNAMLM
 from src.onemaize.regions import GenomeInput, build_onemaize_index
+from src.onemaize.variant_audit import audit_variant_metadata
 from src.onemaize.variants import (
     VariantEvent,
+    VariantInput,
+    build_variant_metadata,
     one_based_closed_to_half_open,
     one_based_insertion_after_to_boundary,
     parse_vcf,
@@ -341,6 +345,25 @@ def test_variant_sampler_is_uniform_by_genotype_and_deterministic(tmp_path):
     assert first[2]["crop_start"] <= first[2]["event_start"] < first[2]["crop_end"]
 
 
+def test_variant_validation_split_is_deterministic(tmp_path):
+    base_dir, variant_dir = _variant_dataset_fixture(tmp_path)
+    dataset = OneMaizeVariantTEMLMDataset(
+        base_dir,
+        variant_dir,
+        tokenizer=_Tokenizer(),
+        split="val",
+        context_length=128,
+        samples_per_epoch=8,
+        deterministic=True,
+        allow_index_build=False,
+        return_metadata=True,
+    )
+    first = [dataset[index] for index in range(len(dataset))]
+    second = [dataset[index] for index in range(len(dataset))]
+    assert all(a[0].equal(b[0]) and a[1].equal(b[1]) and a[2] == b[2] for a, b in zip(first, second))
+    assert {item[2]["genotype"] for item in first} == {"G3"}
+
+
 def test_variant_sampler_probability_validation_and_missing_class_policy(tmp_path):
     base_dir, variant_dir = _variant_dataset_fixture(tmp_path)
     with pytest.raises(ValueError, match="sum to 1"):
@@ -379,6 +402,61 @@ def test_variant_sampler_rejects_train_test_leakage(tmp_path):
     pq.write_table(pa.Table.from_pylist(rows, schema=table.schema), variant_dir / "variant_regions.parquet")
     with pytest.raises(ValueError, match="leakage"):
         _make_dataset(base_dir, variant_dir)
+
+
+def test_variant_builder_and_audit_end_to_end(tmp_path):
+    base_dir, _ = _variant_dataset_fixture(tmp_path)
+    vcf = _write_vcf(
+        tmp_path / "G1.vcf",
+        [
+            "chr1\t100\ts1\tA\tG\t.\tPASS\t.",
+            "chr1\t500\tsv1\tN\t<INV>\t.\tPASS\tSVTYPE=INV;END=800",
+            "chr1\t1200\tte1\tN\t<INS>\t.\tPASS\tSVTYPE=INS;ONEMAIZE_TYPE=te_insertion;SVLEN=200",
+        ],
+    )
+    output = tmp_path / "built-v4"
+    manifest = build_variant_metadata(
+        base_dir,
+        [VariantInput("G1", vcf, "fixture", "G1")],
+        output,
+    )
+    assert manifest["schema_version"] == 4
+    assert manifest["variant_count"] == 3
+    assert {row["variant_type"] for row in pq.read_table(output / "variant_regions.parquet").to_pylist()} == {
+        "snp",
+        "inversion",
+        "te_insertion",
+    }
+
+    report, rows = audit_variant_metadata(
+        base_dir,
+        output,
+        context_length=128,
+        formal=False,
+    )
+    assert report["status"] == "PASS"
+    assert report["variant_count"] == 3
+    assert rows
+
+
+def test_variant_datamodule_setup_keeps_mlm_contract(tmp_path):
+    base_dir, variant_dir = _variant_dataset_fixture(tmp_path)
+    module = OneMaizeVariantTEDNAMLM(
+        _name_="onemaize_variant_te_mlm",
+        data_dir=base_dir,
+        variant_data_dir=variant_dir,
+        context_length=128,
+        train_samples_per_epoch=2,
+        val_samples_per_epoch=2,
+        test_samples_per_epoch=2,
+        allow_index_build=False,
+        batch_size=1,
+    )
+    module.setup()
+    batch = next(iter(module.train_dataloader(num_workers=0)))
+    assert module.mlm is True
+    assert batch[0].shape == batch[1].shape == (1, 128)
+    assert batch[2]["attention_mask"].shape == (1, 128)
 
 
 def test_phase1_and_variant_phase2_model_configs_are_strictly_compatible():

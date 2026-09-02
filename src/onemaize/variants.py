@@ -251,8 +251,10 @@ def parse_vcf(
                 start, end, variant_type, length, left_bp, right_bp = _normalize_vcf_allele(
                     int(position_s), reference, alternate, info
                 )
-                base_id = record_id if record_id not in {"", "."} else (
-                    f"{genotype}:{seqid}:{position_s}:{reference}:{alternate}"
+                base_id = (
+                    f"{genotype}:{source}:{record_id}"
+                    if record_id not in {"", "."}
+                    else f"{genotype}:{source}:{seqid}:{position_s}:{reference}:{alternate}"
                 )
                 variant_id = base_id if len(alts.split(",")) == 1 else f"{base_id}:ALT{alt_index}"
                 yield VariantEvent(
@@ -360,6 +362,7 @@ def build_variant_metadata(
     inputs: Iterable[VariantInput],
     output_dir: Path,
     *,
+    fasta_root: Optional[Path] = None,
     overwrite: bool = False,
 ) -> dict:
     """Build schema-v4 metadata from explicitly mapped per-genotype VCF files."""
@@ -384,11 +387,7 @@ def build_variant_metadata(
     records = [item.resolved() for item in inputs]
     if not records:
         raise ValueError("At least one VariantInput is required")
-    duplicate_inputs = [
-        genotype for genotype, count in Counter(item.genotype for item in records).items() if count > 1
-    ]
-    if duplicate_inputs:
-        raise ValueError(f"Duplicate genotype variant inputs: {sorted(duplicate_inputs)}")
+    root = None if fasta_root is None else Path(fasta_root).expanduser().resolve()
 
     all_events: list[VariantEvent] = []
     counts: dict[str, Counter] = defaultdict(Counter)
@@ -410,6 +409,8 @@ def build_variant_metadata(
                 f"Unsupported variant input {record.variant_file}; current parser supports VCF/VCF.GZ only"
             )
         fasta = Path(genome_by_name[record.genotype]["fasta"])
+        if root is not None:
+            fasta = root / fasta.name
         fai = Path(f"{fasta}.fai")
         if not fai.is_file():
             raise FileNotFoundError(fai)
@@ -486,13 +487,16 @@ def load_variant_inputs(path: Path) -> list[VariantInput]:
         missing = required - set(reader.fieldnames or ())
         if missing:
             raise ValueError(f"Variant input manifest missing columns: {sorted(missing)}")
-        return [
-            VariantInput(
+        rows = []
+        for row in reader:
+            variant_file = Path(row["variant_file"])
+            if not variant_file.is_absolute():
+                variant_file = path.parent / variant_file
+            rows.append(VariantInput(
                 genotype=row["genotype"],
-                variant_file=Path(row["variant_file"]),
+                variant_file=variant_file,
                 source=row["source"],
                 coordinate_genotype=row["coordinate_genotype"],
                 reference_genotype=row.get("reference_genotype", "B73"),
-            )
-            for row in reader
-        ]
+            ))
+        return rows
