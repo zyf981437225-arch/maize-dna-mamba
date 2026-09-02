@@ -313,6 +313,26 @@ def test_formal_nam26_panel_builds_with_23_1_2_split(tmp_path):
     assert manifest["expected_genotype_panel_validated"] is True
     assert manifest["genotype_split_counts"] == {"train": 23, "val": 1, "test": 2}
     assert manifest["region_count"] > 26
+    index_builder = OneMaizeRegionMLMDataset(
+        output.parent / "formal-nam26",
+        tokenizer=_Tokenizer(),
+        split="train",
+        context_length=128,
+        samples_per_epoch=1,
+        deterministic=True,
+        allow_index_build=True,
+    )
+    index_builder[0]
+    index_builder.close()
+    audit_report, audit_rows = audit_population_metadata(
+        output.parent / "formal-nam26",
+        context_length=128,
+        formal=True,
+        low_pool_warning=0,
+    )
+    assert audit_report["status"] == "PASS"
+    assert audit_report["split_counts"] == {"train": 23, "val": 1, "test": 2}
+    assert len(audit_rows) == 26 * 3
 
 
 def test_data_module_declares_same_position_mlm(tmp_path):
