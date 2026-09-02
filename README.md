@@ -2,7 +2,7 @@
 
 Population-aware genomic language modeling for maize.
 
-本 README 是当前仓库的实验操作手册。操作顺序为：原始文件与索引检查、正式输入表冻结、schema-v3 candidate metadata 构建、B73 Phase-I、NAM26 Phase-II continuation、validation/test。命令以仓库当前 `main` 分支的真实脚本和参数为准。
+本 README 是当前仓库的实验操作手册。项目现在明确分为两个从同一 B73 Phase-I checkpoint 分叉的模型；Model B **不得**从 B73 Phase-II checkpoint 初始化。命令以仓库当前 `main` 分支的真实脚本和参数为准。
 
 > **B73 pipeline has been validated.**
 >
@@ -26,39 +26,29 @@ Population-aware genomic language modeling for maize.
 | Phase-II 16K candidate compatibility | **VALIDATED** | **IMPLEMENTED BUT NOT FORMALLY VALIDATED** |
 | Phase-II checkpoint continuation | **IMPLEMENTED BUT NOT FORMALLY VALIDATED** | **IMPLEMENTED BUT NOT FORMALLY VALIDATED** |
 | genotype-held-out validation/test | pilot only | **IMPLEMENTED BUT NOT FORMALLY VALIDATED** |
+| schema-v4 explicit variant metadata | 不需要 | **IMPLEMENTED，WAITING FOR REAL DATA** |
+| variant/TE-aware sampler and fixed evaluation | 不需要 | **IMPLEMENTED，WAITING FOR REAL DATA** |
 | final training | 未完成 | 未完成 |
 
 当前 Phase-I production path 是 **B73-only**：builder 可接收 `--genotype` 和 `--chromosomes`，但 validator、dataset config、launcher 和一个 epoch 的已验证统计均固定为 B73 chr1–chr10；仓库没有把 26 个 full-genome manifest 合并为同一次 Phase-I 训练的入口。因此，当前可执行两阶段流程是 **B73 Phase-I → NAM26 Phase-II**，不能写成 NAM26 全部材料共同完成 Phase-I。
 
-## Training design
+## Training design: two independent models
 
 ```text
-                        OneMaize
-
- B73 BGZF FASTA                              26 NAM genotypes
-       |                              FASTA + gene GFF3 + TE GFF3
-       v                                         |
- Phase I: B73-only                              v
- fixed 8,192-bp windows                  schema-v3 metadata
- stride=8,192; tail PAD                         |
-       |                              32,768-bp candidate regions
-       v                                  /       |       \
- 15% MLM + train RC=0.5          gene-centered non-repeat TE-rich
-       |                               50%        30%      20%
-       v                                  \       |       /
- Phase-I best checkpoint                         |
-       |                                         |
-       +------------------+----------------------+
-                          v
-                Phase II: NAM26 16K
-              dynamic 16,384-bp crop
-                          |
-                          v
-                MLM context continuation
-                          |
-                          v
-             validation / held-out test
+ B73 FASTA -> Phase-I 8K full genome -> B73 Phase-I best checkpoint
+                                              |
+                         +--------------------+--------------------+
+                         |                                         |
+                         v                                         v
+ Model A: B73 Phase-II 16K region-aware       Model B: all-cultivar Phase-II 16K
+ schema-v3 gene/non-repeat/TE-rich            schema-v3 candidates + schema-v4 events
+                         |                     SNP/indel/SV/PAV/TE-polymorphism
+                         v                                         |
+ Reference maize genome language model                            v
+                                            Variant/transposon-aware maize model
 ```
+
+Model A 保留现有 B73 Phase-II 三类 sampler。Model B 使用同一个 B73 Phase-I best checkpoint 通过 `train.pretrained_model_path` 严格加载权重，并新建 optimizer/scheduler。普通 NAM26 FASTA 混合或现有 `te_rich` 都不能替代 explicit variant/TE event annotation。
 
 模型保持仓库现有的 `mamba_ssm.modules.mamba_simple.Mamba` 双向 Caduceus 实现，不是 Mamba2。正式模型为 24 layers、`d_model=864`、约 121,191,553 parameters，使用 BF16、15% MLM、80/10/10 corruption、single-base `A/C/G/T/N` tokenizer 和训练集 0.5 reverse-complement augmentation。
 
@@ -736,9 +726,9 @@ sbatch --export=ALL,STAGE=test \
 
 该 test 是 B73 fixed-manifest 的确定性技术检查，不是 genotype-held-out population evaluation。
 
-## Phase II — 16K annotation-aware context adaptation (NAM26)
+## Model A Phase II — B73 16K annotation-aware context adaptation
 
-Phase-II 不是从头训练。`INIT_CKPT` 通过 `train.pretrained_model_path` 严格加载 Phase-I model state，并建立新的 Phase-II optimizer/scheduler；`RESUME_CKPT` 则恢复已经开始的 Phase-II 完整训练状态。两者不能同时设置。
+Phase-II 不是从头训练。`INIT_CKPT` 通过 `train.pretrained_model_path` 严格加载 Phase-I model state，并建立新的 Phase-II optimizer/scheduler；`RESUME_CKPT` 则恢复已经开始的 Phase-II 完整训练状态。两者不能同时设置。Model A 正式数据目录应只包含 B73；`scripts/run_onemaize_h200.sh` 仍可读取 NAM26 schema-v3，但那只是普通 population region-aware 训练，不是 Model B 的 explicit variant-aware path。
 
 Phase-II region sampling：
 
@@ -876,6 +866,104 @@ sbatch --export=ALL,STAGE=test16k \
 **Expected output**：`$PHASE2_RUN_ROOT/test16k/run_manifest.txt` 和 `test.log`。
 
 **Pass condition**：test 只读取 TSV 中冻结的 2 个 test genotypes；无 train genotype 混入；指标有限且 checkpoint 与 run manifest 对应。
+
+## Model B Phase II — all-cultivar explicit variant/TE-aware adaptation
+
+> **Current status: IMPLEMENTED / WAITING FOR REAL DATA.** 仓库没有真实 NAM26 VCF/SV/PAV/TE-polymorphism 文件，当前不能宣称可以正式训练。
+
+Model B 保留 schema-v3，并增加独立 schema-v4：
+
+```text
+schema-v3: manifest.json + genomes.parquet + regions.parquet
+schema-v4: variant_manifest.json + variant_regions.parquet
+```
+
+schema-v4 中 `coordinate_genotype` 必须等于 `genotype`，表示坐标可以直接索引该 genotype FASTA。若 VCF 坐标仍在 B73 reference space，必须先完成经过验证的 liftover/assembly mapping；builder 会拒绝把 B73 坐标直接套到其他 cultivar FASTA。
+
+### 1 — Prepare the variant input control table
+
+当前已实现的真实文件 parser 只支持标准 `VCF`/`VCF.GZ`。控制表只映射文件，不规定实验室专用 PAV/TE 表字段：
+
+```tsv
+genotype	variant_file	source	coordinate_genotype	reference_genotype
+B97	/path/to/B97.genotype_coordinates.vcf.gz	caller-and-version	B97	B73
+```
+
+TE/PAV 专用文件必须在确认真实列定义和坐标空间后再加 adapter；不要把普通 TE GFF3 或 assembly FASTA 差异写成 TE insertion polymorphism。完整缺失项见 [`docs/audits/onemaize_variant_te/MISSING_VARIANT_INPUTS.md`](docs/audits/onemaize_variant_te/MISSING_VARIANT_INPUTS.md)。
+
+### 2 — Build schema-v4
+
+```bash
+export ONEMAIZE_VARIANT_INPUTS="$ONEMAIZE_ROOT/manifests/onemaize_variant_inputs.tsv"
+export ONEMAIZE_VARIANT_DATA_DIR="$ONEMAIZE_ROOT/metadata/nam26_variant_te_v4"
+
+python scripts/build_onemaize_variant_metadata.py \
+  --base-data-dir "$ONEMAIZE_DATA_DIR" \
+  --input-manifest "$ONEMAIZE_VARIANT_INPUTS" \
+  --output-dir "$ONEMAIZE_VARIANT_DATA_DIR"
+```
+
+输出：`variant_manifest.json` 和 `variant_regions.parquet`。内部坐标只转换一次并统一为 0-based half-open。SNP/small indel 采 event context；超长 SV/PAV 采 left/right breakpoint；TE insertion/deletion 只有在真实 annotation 明确标注后才进入 `te_variant`。
+
+### 3 — Audit and validate
+
+```bash
+export RUN_ROOT="$ONEMAIZE_ROOT/runs/model_b_preflight"
+bash scripts/run_onemaize_variant_te_phase2_h200.sh audit
+bash scripts/run_onemaize_variant_te_phase2_h200.sh validate
+```
+
+正式 audit 检查 genotype/split/B73、FASTA/FAI/GZI、gene/TE/variant 文件、variant 和 candidate counts、N fraction、重复 ID、越界、split leakage、TE family、PAV/SV 可用性、缺失 class 和 event coverage。任一 error 时停止。
+
+### 4 — Benchmark and smoke
+
+```bash
+bash scripts/run_onemaize_variant_te_phase2_h200.sh benchmark
+
+export PHASE1_CKPT="$PHASE1_RUN_ROOT/train/checkpoints_best/val_loss.ckpt"
+unset RESUME_CKPT
+export MAX_STEPS=10 WARMUP_STEPS=2
+bash scripts/run_onemaize_variant_te_phase2_h200.sh smoke
+```
+
+launcher 会检查 `PHASE1_CKPT` 的 stored config 必须是 B73、8,192 bp、`mode=full_genome`。不得传 Model A 的 B73 Phase-II checkpoint。
+
+### 5 — Formal train or exact resume
+
+sampling pilot default 为 `gene/non-repeat/TE-rich/small-variant/SV-PAV/TE-variant = 0.20/0.15/0.15/0.20/0.20/0.10`。该比例只是可运行默认值，**sampling ratio requires ablation**；所有概率均在 YAML 中配置并强制和为 1。
+
+```bash
+export PHASE1_CKPT="$PHASE1_RUN_ROOT/train/checkpoints_best/val_loss.ckpt"
+export MAX_STEPS=<benchmark-approved-steps>
+export WARMUP_STEPS=<approved-warmup>
+export CHECKPOINT_INTERVAL=<approved-interval>
+bash scripts/run_onemaize_variant_te_phase2_h200.sh train
+
+# Exact Model-B resume; restores optimizer/scheduler/global step.
+unset PHASE1_CKPT
+export RESUME_CKPT="$RUN_ROOT/train/checkpoints_resume/last.ckpt"
+bash scripts/run_onemaize_variant_te_phase2_h200.sh train
+```
+
+在 PBS 8×H200 上可从 [`pbs_scripts/run_onemaize_variant_te_phase2.pbs`](pbs_scripts/run_onemaize_variant_te_phase2.pbs) 开始；launcher 不依赖 PBS/Slurm Python API，在 PBS allocation 内直接由 Lightning 启动 8 个本地进程。
+
+### 6 — Fair checkpoint evaluation
+
+不得比较不同训练日志里的 `val_loss`。在同一个 deterministic 16K set 上比较：
+
+```bash
+python scripts/evaluate_onemaize_checkpoints.py \
+  --checkpoint "phase1=$PHASE1_CKPT" \
+  --checkpoint "reference_phase2=$MODEL_A_CKPT" \
+  --checkpoint "variant_te_phase2=$MODEL_B_CKPT" \
+  --base-data-dir "$ONEMAIZE_DATA_DIR" \
+  --variant-data-dir "$ONEMAIZE_VARIANT_DATA_DIR" \
+  --split test --context-length 16384 --samples-per-class 256 \
+  --output-csv "$RUN_ROOT/checkpoint_comparison.csv" \
+  --output-markdown "$RUN_ROOT/checkpoint_comparison.md"
+```
+
+输出 overall、gene-centered、non-repeat、TE-rich、SNP、indel、SV、PAV、TE insertion/deletion、per-genotype、macro-class 和 macro-genotype loss/perplexity/token/sample counts。无数据的类别明确写 `N/A`。
 
 ## Pre-flight checklist
 

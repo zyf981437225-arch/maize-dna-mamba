@@ -30,11 +30,19 @@ from src.dataloaders.datasets.onemaize_dataset import (
     OneMaizeRegionMLMDataset,
     collate_onemaize_mlm,
 )
+from src.dataloaders.datasets.onemaize_variant_dataset import (
+    OneMaizeVariantTEMLMDataset,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path, required=True)
+    parser.add_argument(
+        "--variant-data-dir",
+        type=Path,
+        help="Enable the schema-v4 explicit variant/TE Phase-II sampler",
+    )
     parser.add_argument("--fasta-root")
     parser.add_argument("--output-json", type=Path)
     parser.add_argument("--mode", choices=("both", "backbone", "memory"), default="both")
@@ -65,7 +73,17 @@ def synchronize(device: torch.device) -> None:
 
 
 def make_dataset(args, tokenizer, samples: int, deterministic: bool):
-    return OneMaizeRegionMLMDataset(
+    dataset_class = (
+        OneMaizeVariantTEMLMDataset
+        if args.variant_data_dir is not None
+        else OneMaizeRegionMLMDataset
+    )
+    variant_args = (
+        {"variant_data_dir": args.variant_data_dir}
+        if args.variant_data_dir is not None
+        else {}
+    )
+    return dataset_class(
         args.data_dir,
         tokenizer=tokenizer,
         split="train",
@@ -76,6 +94,7 @@ def make_dataset(args, tokenizer, samples: int, deterministic: bool):
         deterministic=deterministic,
         seed=args.seed,
         fasta_root=args.fasta_root,
+        **variant_args,
     )
 
 
@@ -229,6 +248,7 @@ def main() -> None:
         "d_model": args.d_model,
         "n_layer": args.n_layer,
         "context_length": args.context_length,
+        "sampler": "variant_te" if args.variant_data_dir is not None else "schema_v3_region_aware",
         "batch_size": args.batch_size,
         "warmup_steps": args.warmup_steps,
         "measured_steps": args.steps,

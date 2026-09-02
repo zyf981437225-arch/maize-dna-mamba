@@ -1,0 +1,35 @@
+_name_: onemaize_variant_te_mlm
+
+# Model B uses the unchanged schema-v3 candidates plus the independent
+# schema-v4 explicit-event layer.
+data_dir: ${oc.env:ONEMAIZE_DATA_DIR,data/processed/onemaize_nam26}
+variant_data_dir: ${oc.env:ONEMAIZE_VARIANT_DATA_DIR,data/processed/onemaize_nam26_variants}
+fasta_root: null
+sequence_type: dna
+species: Zea mays
+tokenizer_name: char
+context_length: 16384
+mlm_probability: 0.15
+reverse_complement_probability: 0.5
+max_n_fraction: 0.1
+max_crop_attempts: 16
+
+# Configurable pilot default only. The final ratio requires ablation.
+gene_probability: 0.20
+non_repeat_probability: 0.15
+te_rich_probability: 0.15
+small_variant_probability: 0.20
+structural_variant_probability: 0.20
+te_variant_probability: 0.10
+missing_class_policy: error
+small_variant_max_length: 50
+variant_jitter: 4096
+
+train_samples_per_epoch: 100000
+val_samples_per_epoch: 2048
+test_samples_per_epoch: 2048
+batch_size: 1
+batch_size_eval: 1
+shuffle: false
+seed: 2357
+allow_index_build: false
