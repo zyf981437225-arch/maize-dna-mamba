@@ -30,7 +30,7 @@ Population-aware genomic language modeling for maize.
 | variant/TE-aware sampler and fixed evaluation | 不需要 | **IMPLEMENTED，WAITING FOR REAL DATA** |
 | final training | 未完成 | 未完成 |
 
-当前 Phase-I production path 是 **B73-only**：builder 可接收 `--genotype` 和 `--chromosomes`，但 validator、dataset config、launcher 和一个 epoch 的已验证统计均固定为 B73 chr1–chr10；仓库没有把 26 个 full-genome manifest 合并为同一次 Phase-I 训练的入口。因此，当前可执行两阶段流程是 **B73 Phase-I → NAM26 Phase-II**，不能写成 NAM26 全部材料共同完成 Phase-I。
+当前 Phase-I production path 是 **B73-only**：builder 可接收 `--genotype` 和 `--chromosomes`，但 validator、dataset config、launcher 和一个 epoch 的已验证统计均固定为 B73 chr1–chr10；仓库没有把 26 个 full-genome manifest 合并为同一次 Phase-I 训练的入口。当前正式设计从同一个 B73 Phase-I checkpoint 分叉为 **Model A：B73 Phase-II** 与 **Model B：all-cultivar explicit variant/TE-aware Phase-II**。仓库仍保留普通 NAM26 schema-v3 region-aware 入口，但它不等同于 Model B，也不能写成 NAM26 全部材料共同完成 Phase-I。
 
 ## Training design: two independent models
 
@@ -166,20 +166,18 @@ sbatch --export=ALL,STAGE=smoke slurm_scripts/run_onemaize_phase1_h200.slurm
 
 确认 benchmark 和 smoke 通过后，再按后文 “Phase I” 计算并设置 `MAX_STEPS`、`WARMUP_STEPS` 和 `CHECKPOINT_INTERVAL`，提交 `STAGE=train`。
 
-### Step 7 — Continue at Phase-II 16K
+### Step 7 — Fork the Phase-I checkpoint into Model A or Model B
 
 ```bash
-export RUN_ROOT="$PHASE2_RUN_ROOT"
-export INIT_CKPT="$PHASE1_RUN_ROOT/train/checkpoints_best/val_loss.ckpt"
+export PHASE1_CKPT="$PHASE1_RUN_ROOT/train/checkpoints_best/val_loss.ckpt"
 export NUM_DEVICES=8
 export BATCH_SIZE=1
 export BATCH_SIZE_EVAL=1
 export GRAD_ACCUM=1
 export NUM_WORKERS=8
-export REQUIRE_FORMAL=1
 ```
 
-先运行单 H200 16K benchmark 和 8 卡短训练；通过后再冻结正式步数。详细命令见后文 “Phase II”。
+Model A 将 `PHASE1_CKPT` 作为现有 B73 Phase-II 的 `INIT_CKPT`。Model B 必须先完成 schema-v4 build/audit，再把同一个 `PHASE1_CKPT` 交给 `run_onemaize_variant_te_phase2_h200.sh`。两条分支分别建立 optimizer/scheduler，互不 resume。详细命令见后文两个 Model Phase-II 章节。
 
 ## Environment and dependencies
 
@@ -878,7 +876,7 @@ schema-v3: manifest.json + genomes.parquet + regions.parquet
 schema-v4: variant_manifest.json + variant_regions.parquet
 ```
 
-schema-v4 中 `coordinate_genotype` 必须等于 `genotype`，表示坐标可以直接索引该 genotype FASTA。若 VCF 坐标仍在 B73 reference space，必须先完成经过验证的 liftover/assembly mapping；builder 会拒绝把 B73 坐标直接套到其他 cultivar FASTA。
+schema-v4 中 `coordinate_genotype` 必须等于 `genotype`，表示坐标可以直接索引该 genotype FASTA。若 VCF 坐标仍在 B73 reference space，必须先完成经过验证的 liftover/assembly mapping；builder 会拒绝把 B73 坐标直接套到其他 cultivar FASTA。字段定义见 [`docs/ONEMAIZE_VARIANT_SCHEMA_V4.md`](docs/ONEMAIZE_VARIANT_SCHEMA_V4.md)。
 
 ### 1 — Prepare the variant input control table
 
@@ -990,6 +988,17 @@ python scripts/evaluate_onemaize_checkpoints.py \
 - [ ] output/checkpoint filesystem has sufficient free space
 - [ ] final `MAX_STEPS`, warmup, batch and checkpoint interval frozen
 
+Model B additionally requires:
+
+- [ ] real per-genotype SNP/indel and SV/PAV inputs available
+- [ ] real cultivar-specific TE insertion/deletion annotation available
+- [ ] every event coordinate explicitly mapped to its genotype FASTA
+- [ ] schema-v4 `variant_manifest.json` and `variant_regions.parquet` built
+- [ ] variant audit reports no duplicate ID, out-of-FASTA event or split leakage
+- [ ] every enabled genotype/class pool is non-empty
+- [ ] `PHASE1_CKPT` gate confirms B73 8K `full_genome`; no Model-A Phase-II checkpoint used
+- [ ] sampling probabilities and ablation plan frozen
+
 > **任一必要项未通过，不要启动对应阶段的正式训练。**
 
 通用磁盘检查：
@@ -1012,6 +1021,10 @@ du -sh "$ONEMAIZE_ROOT"/runs "$ONEMAIZE_ROOT"/runs/*/checkpoints* 2>/dev/null ||
 | Phase-II benchmark | `benchmark_16k_single_h200.json` |
 | Phase-II train | `16k/run_manifest.txt`, `16k/console.log`, best/resume checkpoint directories |
 | Phase-II test | `test16k/run_manifest.txt`, `test16k/test.log` |
+| Model B schema-v4 | `variant_manifest.json`, `variant_regions.parquet` |
+| Model B audit | `VARIANT_INPUT_AUDIT.md/.json`, `VARIANT_SAMPLER_AUDIT.md`, `VARIANT_SAMPLER_COUNTS.csv` |
+| Model B benchmark/train | `variant_te_phase2_h200.json`, `run_manifest.txt`, logs/checkpoints |
+| Fair checkpoint evaluation | `checkpoint_comparison.csv`, `checkpoint_comparison.md` |
 
 原始 FASTA、annotation 和 checkpoints 不提交 Git。正式归档至少包括 Git commit、冻结 TSV、schema-v3 metadata、完整 Hydra config、Slurm job ID、benchmark JSON、console log、best/last checkpoint、split 和 validation/test 指标。
 
@@ -1086,7 +1099,7 @@ NAM26 schema-v3 builder、formal gate、region-aware loader、16K continuation�
 4. **Two Phase-II experiment YAMLs are not wired identically.** H200 launcher 实际调用 `onemaize_b73_16k.yaml`，不是 `onemaize_b73_phase2_16k_region_aware.yaml`；正式记录必须以 launcher 输出的 Hydra config 为准。
 5. `audit_onemaize_phase2_candidate_lengths.py` 的结论文字仍为 B73-specific；用于 NAM26 时数值覆盖全部 metadata，但报告措辞尚未泛化。
 
-这些限制不阻止当前已定义的 **B73 Phase-I → NAM26 Phase-II** 流程在数据到位后试运行；但它们阻止将仓库描述为“26 个 genotype 全部完成 exhaustive Phase-I 且已有完整 8×H200 benchmark”。
+这些限制不阻止 Model A 在 B73 数据上试运行，也不阻止 Model B 在真实、已映射的 all-cultivar variant/TE 数据到位并通过 schema-v4 audit 后试运行；但它们阻止将仓库描述为“26 个 genotype 全部完成 exhaustive Phase-I”“Model B 已有真实数据验证”或“已有完整 8×H200 benchmark”。
 
 ## Repository map
 
@@ -1095,11 +1108,13 @@ configs/
 ├── dataset/
 │   ├── onemaize_b73_phase1_8k_full_genome.yaml   # B73 fixed-manifest dataset
 │   ├── onemaize_b73_phase2_16k_region_aware.yaml # explicit 16K region dataset
-│   └── onemaize_dna_mlm.yaml                     # schema-v3 region-aware defaults
+│   ├── onemaize_dna_mlm.yaml                     # schema-v3 region-aware defaults
+│   └── onemaize_allcultivar_phase2_variant_te_16k.yaml # Model B dataset
 └── experiment/
     ├── onemaize_b73_phase1_8k_full_genome.yaml   # current Phase-I experiment
     ├── onemaize_b73_16k.yaml                     # config used by H200 16K launcher
-    └── onemaize_b73_phase2_16k_region_aware.yaml # explicit Phase-II config, not launcher default
+    ├── onemaize_b73_phase2_16k_region_aware.yaml # explicit Phase-II config, not launcher default
+    └── onemaize_allcultivar_phase2_variant_te_16k.yaml # Model B experiment
 
 scripts/
 ├── build_b73_phase1_8k_manifest.py               # B73 fixed 8K index
@@ -1111,7 +1126,12 @@ scripts/
 ├── validate_onemaize_data.py                      # region metadata/read validator
 ├── audit_onemaize_phase2_candidate_lengths.py     # 16K candidate-length audit
 ├── benchmark_onemaize.py                          # single-process region benchmark
-└── run_onemaize_h200.sh                           # formal region-aware H200 stages
+├── run_onemaize_h200.sh                           # schema-v3 region-aware H200 stages
+├── build_onemaize_variant_metadata.py             # schema-v4 VCF builder
+├── audit_onemaize_variant_te.py                   # Model B preflight gate
+├── validate_onemaize_variant_te.py                # deterministic reads/crops
+├── evaluate_onemaize_checkpoints.py               # fair checkpoint comparison
+└── run_onemaize_variant_te_phase2_h200.sh          # Model B H200/PBS-safe launcher
 
 slurm_scripts/
 ├── run_onemaize_phase1_h200.slurm
@@ -1119,13 +1139,19 @@ slurm_scripts/
 
 src/
 ├── onemaize/regions.py                            # schema-v3, TE union, candidate construction
+├── onemaize/variants.py                           # schema-v4 and coordinate conversion
+├── onemaize/variant_audit.py                      # Model B audit implementation
 ├── onemaize/phase1_coverage.py                    # fixed-manifest DDP coverage metrics
 ├── dataloaders/onemaize_mlm.py                    # Phase-I/Phase-II data module
+├── dataloaders/onemaize_variant_mlm.py            # Model B data module
 └── dataloaders/datasets/
     ├── onemaize_phase1_dataset.py                 # fixed B73 windows and tail PAD
-    └── onemaize_dataset.py                        # 50/30/20 dynamic region sampler
+    ├── onemaize_dataset.py                        # 50/30/20 dynamic region sampler
+    └── onemaize_variant_dataset.py                # explicit event-centered sampler
 
 docs/audits/onemaize_b73/                          # real B73 validation evidence
+docs/audits/onemaize_variant_te/                   # status and missing-input contract
+pbs_scripts/run_onemaize_variant_te_phase2.pbs     # 8×H200 PBS example
 ```
 
 ## Troubleshooting

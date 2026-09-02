@@ -285,3 +285,21 @@ def write_audit_outputs(output_dir: Path, report: dict, rows: list[dict]) -> Non
     (output_dir / "VARIANT_INPUT_AUDIT.md").write_text(
         "\n".join(lines) + "\n", encoding="utf-8"
     )
+    sampler_lines = [
+        "# OneMaize variant sampler audit",
+        "",
+        f"- Status: **{report['status']}**",
+        "- Sampling order: uniform genotype, then configured class, then event/candidate",
+        f"- Missing genotype/class pools: {len(report['missing_classes'])}",
+        "",
+        "| Genotype | Split | Sampling class | Candidates/events |",
+        "|---|---|---|---:|",
+    ]
+    sampler_lines.extend(
+        f"| {row['genotype']} | {row['split']} | {row['sampling_class']} | "
+        f"{row['event_or_candidate_count']} |"
+        for row in rows
+    )
+    (output_dir / "VARIANT_SAMPLER_AUDIT.md").write_text(
+        "\n".join(sampler_lines) + "\n", encoding="utf-8"
+    )

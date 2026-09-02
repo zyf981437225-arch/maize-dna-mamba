@@ -14,7 +14,7 @@ from src.dataloaders.datasets.onemaize_variant_dataset import (
 )
 from src.dataloaders.onemaize_variant_mlm import OneMaizeVariantTEDNAMLM
 from src.onemaize.regions import GenomeInput, build_onemaize_index
-from src.onemaize.variant_audit import audit_variant_metadata
+from src.onemaize.variant_audit import audit_variant_metadata, write_audit_outputs
 from src.onemaize.variants import (
     VariantEvent,
     VariantInput,
@@ -357,6 +357,7 @@ def test_variant_validation_split_is_deterministic(tmp_path):
         deterministic=True,
         allow_index_build=False,
         return_metadata=True,
+        variant_jitter=32,
     )
     first = [dataset[index] for index in range(len(dataset))]
     second = [dataset[index] for index in range(len(dataset))]
@@ -414,14 +415,21 @@ def test_variant_builder_and_audit_end_to_end(tmp_path):
             "chr1\t1200\tte1\tN\t<INS>\t.\tPASS\tSVTYPE=INS;ONEMAIZE_TYPE=te_insertion;SVLEN=200",
         ],
     )
+    second_vcf = _write_vcf(
+        tmp_path / "G1.second.vcf",
+        ["chr1\t150\ts1\tC\tT\t.\tPASS\t."],
+    )
     output = tmp_path / "built-v4"
     manifest = build_variant_metadata(
         base_dir,
-        [VariantInput("G1", vcf, "fixture", "G1")],
+        [
+            VariantInput("G1", vcf, "fixture", "G1"),
+            VariantInput("G1", second_vcf, "fixture-second", "G1"),
+        ],
         output,
     )
     assert manifest["schema_version"] == 4
-    assert manifest["variant_count"] == 3
+    assert manifest["variant_count"] == 4
     assert {row["variant_type"] for row in pq.read_table(output / "variant_regions.parquet").to_pylist()} == {
         "snp",
         "inversion",
@@ -435,8 +443,14 @@ def test_variant_builder_and_audit_end_to_end(tmp_path):
         formal=False,
     )
     assert report["status"] == "PASS"
-    assert report["variant_count"] == 3
+    assert report["variant_count"] == 4
     assert rows
+    audit_output = tmp_path / "audit"
+    write_audit_outputs(audit_output, report, rows)
+    assert (audit_output / "VARIANT_INPUT_AUDIT.json").is_file()
+    assert (audit_output / "VARIANT_INPUT_AUDIT.md").is_file()
+    assert (audit_output / "VARIANT_SAMPLER_AUDIT.md").is_file()
+    assert (audit_output / "VARIANT_SAMPLER_COUNTS.csv").is_file()
 
 
 def test_variant_datamodule_setup_keeps_mlm_contract(tmp_path):
@@ -451,6 +465,7 @@ def test_variant_datamodule_setup_keeps_mlm_contract(tmp_path):
         test_samples_per_epoch=2,
         allow_index_build=False,
         batch_size=1,
+        variant_jitter=32,
     )
     module.setup()
     batch = next(iter(module.train_dataloader(num_workers=0)))

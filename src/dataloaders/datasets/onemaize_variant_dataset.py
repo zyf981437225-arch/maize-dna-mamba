@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from collections import Counter
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -17,7 +16,11 @@ from src.onemaize.variants import (
     read_fai_lengths,
 )
 
-from .onemaize_dataset import OneMaizeRegionMLMDataset, reverse_complement
+from .onemaize_dataset import (
+    OneMaizeRegionMLMDataset,
+    _ArrowRegionRows,
+    reverse_complement,
+)
 
 
 SAMPLING_CLASSES = (
@@ -192,6 +195,8 @@ class OneMaizeVariantTEMLMDataset(OneMaizeRegionMLMDataset):
         self.return_metadata = bool(return_metadata)
 
         try:
+            import pyarrow as pa
+            import pyarrow.compute as pc
             import pyarrow.parquet as pq
         except ImportError as exc:  # pragma: no cover
             raise RuntimeError("Reading variant metadata requires pyarrow") from exc
@@ -223,21 +228,13 @@ class OneMaizeVariantTEMLMDataset(OneMaizeRegionMLMDataset):
             "te_family",
         ]
         variant_path = self.variant_data_dir / variant_manifest["files"]["variants"]
-        all_variants = pq.read_table(
+        audit_table = pq.read_table(
             variant_path,
             columns=["variant_id", "genotype", "coordinate_genotype", "split"],
-        ).to_pylist()
-        duplicate_variant_ids = [
-            variant_id
-            for variant_id, count in Counter(
-                row["variant_id"] for row in all_variants
-            ).items()
-            if count > 1
-        ]
-        if duplicate_variant_ids:
-            raise ValueError(
-                "Duplicate variant IDs: " + ", ".join(duplicate_variant_ids[:10])
-            )
+        )
+        distinct_ids = int(pc.count_distinct(audit_table["variant_id"]).as_py())
+        if distinct_ids != len(audit_table):
+            raise ValueError("Duplicate variant IDs in schema-v4 metadata")
         split_by_genotype = {
             row["genotype"]: row["default_split"]
             for row in pq.read_table(
@@ -245,15 +242,38 @@ class OneMaizeVariantTEMLMDataset(OneMaizeRegionMLMDataset):
                 columns=["genotype", "default_split"],
             ).to_pylist()
         }
-        leakage = [
-            row["variant_id"]
-            for row in all_variants
-            if row["coordinate_genotype"] != row["genotype"]
-            or split_by_genotype.get(row["genotype"]) != row["split"]
-        ]
-        if leakage:
+        coordinate_mismatch = int(
+            pc.sum(
+                pc.cast(
+                    pc.not_equal(
+                        audit_table["coordinate_genotype"], audit_table["genotype"]
+                    ),
+                    pa.int64(),
+                )
+            ).as_py()
+            or 0
+        )
+        variant_genotypes = set(pc.unique(audit_table["genotype"]).to_pylist())
+        split_mismatches = []
+        for genotype in variant_genotypes:
+            expected_split = split_by_genotype.get(genotype)
+            observed_splits = set(
+                pc.unique(
+                    pc.filter(
+                        audit_table["split"],
+                        pc.equal(audit_table["genotype"], genotype),
+                    )
+                ).to_pylist()
+            )
+            if expected_split is None or observed_splits != {expected_split}:
+                split_mismatches.append(
+                    f"{genotype}: observed={sorted(observed_splits)}, expected={expected_split}"
+                )
+        if coordinate_mismatch or split_mismatches:
             raise ValueError(
-                "Variant coordinate/split leakage detected: " + ", ".join(leakage[:10])
+                "Variant coordinate/split leakage detected: "
+                f"coordinate_mismatches={coordinate_mismatch}; "
+                + "; ".join(split_mismatches[:10])
             )
 
         table = pq.read_table(
@@ -266,24 +286,47 @@ class OneMaizeVariantTEMLMDataset(OneMaizeRegionMLMDataset):
             if variant_type_filter is None
             else {str(item) for item in variant_type_filter}
         )
-        self.variant_rows = [
-            row
-            for row in table.to_pylist()
-            if allowed_variant_types is None or row["variant_type"] in allowed_variant_types
-        ]
+        if allowed_variant_types is not None:
+            table = table.filter(
+                pc.is_in(
+                    table["variant_type"],
+                    value_set=pa.array(sorted(allowed_variant_types)),
+                )
+            )
+        self.variant_rows = _ArrowRegionRows(table, variant_columns)
+        genotype_values = np.asarray(
+            table["genotype"].combine_chunks().to_pylist(), dtype=object
+        )
+        type_values = np.asarray(
+            table["variant_type"].combine_chunks().to_pylist(), dtype=object
+        )
+        length_values = table["variant_length"].combine_chunks().to_numpy(
+            zero_copy_only=False
+        )
+        class_values = np.full(len(table), "", dtype=object)
+        te_mask = np.isin(type_values, tuple(TE_VARIANT_TYPES))
+        small_mask = (
+            np.isin(type_values, tuple(SMALL_VARIANT_TYPES))
+            & (np.abs(length_values) <= self.small_variant_max_length)
+            & ~te_mask
+        )
+        structural_mask = (
+            np.isin(type_values, tuple(STRUCTURAL_VARIANT_TYPES))
+            & ~small_mask
+            & ~te_mask
+        )
+        class_values[small_mask] = "small_variant"
+        class_values[structural_mask] = "structural_variant"
+        class_values[te_mask] = "te_variant"
+        if np.any(class_values == ""):
+            unassigned = sorted(set(type_values[class_values == ""].tolist()))
+            raise ValueError(f"Unassigned variant types: {unassigned}")
         self.variant_grouped_indices: dict[tuple[str, str], np.ndarray] = {}
         for genotype in self.genotypes:
             for sampling_class in VARIANT_SAMPLING_CLASSES:
-                indices = np.asarray(
-                    [
-                        index
-                        for index, row in enumerate(self.variant_rows)
-                        if row["genotype"] == genotype
-                        and event_sampling_class(row, self.small_variant_max_length)
-                        == sampling_class
-                    ],
-                    dtype=np.int64,
-                )
+                indices = np.flatnonzero(
+                    (genotype_values == genotype) & (class_values == sampling_class)
+                ).astype(np.int64, copy=False)
                 if indices.size:
                     self.variant_grouped_indices[(genotype, sampling_class)] = indices
 
