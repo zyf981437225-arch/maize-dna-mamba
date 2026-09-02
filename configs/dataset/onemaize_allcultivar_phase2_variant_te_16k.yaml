@@ -1,7 +1,7 @@
 _name_: onemaize_variant_te_mlm
 
-# Model B uses the unchanged schema-v3 candidates plus the independent
-# schema-v4 explicit-event layer.
+# Experimental explicit variant-aware extension. Not required by formal Model B.
+# Uses unchanged schema-v3 candidates plus the independent schema-v4 event layer.
 data_dir: ${oc.env:ONEMAIZE_DATA_DIR,data/processed/onemaize_nam26}
 variant_data_dir: ${oc.env:ONEMAIZE_VARIANT_DATA_DIR,data/processed/onemaize_nam26_variants}
 fasta_root: null

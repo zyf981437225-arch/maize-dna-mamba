@@ -376,7 +376,7 @@ def test_variant_sampler_probability_validation_and_missing_class_policy(tmp_pat
         )
     )
     pq.write_table(filtered, variant_dir / "variant_regions.parquet")
-    with pytest.raises(ValueError, match="Missing required genotype/class pools"):
+    with pytest.raises(ValueError, match="Missing required sampling-class pools"):
         _make_dataset(
             base_dir,
             variant_dir,
@@ -391,6 +391,40 @@ def test_variant_sampler_probability_validation_and_missing_class_policy(tmp_pat
         missing_class_policy="renormalize",
     )
     assert dataset.sample_metadata(0)["sampling_class"] == "small_variant"
+
+
+def test_variant_sampler_does_not_require_b73_variant_classes(tmp_path):
+    base_dir, variant_dir = _variant_dataset_fixture(tmp_path)
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    genomes_path = base_dir / "genomes.parquet"
+    genome_rows = pq.read_table(genomes_path).to_pylist()
+    for row in genome_rows:
+        if row["genotype"] == "G1":
+            row["genotype"] = "B73"
+    genome_schema = pq.read_table(genomes_path).schema
+    pq.write_table(pa.Table.from_pylist(genome_rows, schema=genome_schema), genomes_path)
+
+    regions_path = base_dir / "regions.parquet"
+    region_rows = pq.read_table(regions_path).to_pylist()
+    for row in region_rows:
+        if row["genotype"] == "G1":
+            row["genotype"] = "B73"
+            row["region_id"] = row["region_id"].replace("G1:", "B73:", 1)
+    region_schema = pq.read_table(regions_path).schema
+    pq.write_table(pa.Table.from_pylist(region_rows, schema=region_schema), regions_path)
+
+    variant_path = variant_dir / "variant_regions.parquet"
+    variants = pq.read_table(variant_path)
+    variants = variants.filter(pc.not_equal(variants["genotype"], "G1"))
+    pq.write_table(variants, variant_path)
+
+    dataset = _make_dataset(base_dir, variant_dir)
+    observed = {dataset.sample_metadata(index)["genotype"] for index in range(100)}
+    assert observed == {"G2"}
+    assert "B73" in dataset.genotypes
+    assert "B73" not in dataset.eligible_genotypes_by_class["small_variant"]
 
 
 def test_variant_sampler_rejects_train_test_leakage(tmp_path):

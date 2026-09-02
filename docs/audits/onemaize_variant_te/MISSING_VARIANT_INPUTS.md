@@ -1,10 +1,13 @@
-# Missing variant inputs for OneMaize Model B
+# Missing inputs for the experimental explicit variant-aware extension
 
-Status: **BLOCKED BY MISSING VARIANT DATA**
+Status: **EXPERIMENTAL EXTENSION BLOCKED BY MISSING VARIANT DATA**
+
+This does not block the current formal schema-v3 Model B, which requires only
+FASTA/FAI/GZI, gene GFF3 and TE GFF3 for the NAM26 panel.
 
 The repository contains no real NAM26 VCF/BCF, SV, PAV, cultivar-specific TE insertion/deletion, TE-family polymorphism, or validated assembly-to-B73 coordinate-mapping files. Different cultivar FASTA sequences are not explicit variant annotation.
 
-Formal Model B preparation requires, for every genotype entering a split:
+The experimental schema-v4 extension requires, for every genotype entering a split:
 
 1. A frozen genotype split consistent with schema-v3 (`23 train / 1 val / 2 test`, B73 in train).
 2. Variant events whose coordinates index that genotype's training FASTA, or a validated transformation that produces such coordinates.

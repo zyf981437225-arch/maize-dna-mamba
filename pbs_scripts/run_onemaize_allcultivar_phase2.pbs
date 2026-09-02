@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+#PBS -q rt_HF
+#PBS -N onemaize_allcultivar_phase2
+#PBS -l select=1:ncpus=64:ngpus=8
+#PBS -l walltime=24:00:00
+#PBS -P gaa50089
+#PBS -j oe
+
+set -euo pipefail
+module load cuda/12.6/12.6.1
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate rna-mamba
+
+cd /home/acd13855wx/projects/onemaize_project/onemaize
+: "${ONEMAIZE_DATA_DIR:?Set the formal schema-v3 metadata directory}"
+: "${PHASE1_CKPT:?Set the B73 Phase-I best checkpoint}"
+: "${MAX_STEPS:?Set the benchmark-derived training budget}"
+: "${WARMUP_STEPS:?Set the frozen warmup budget}"
+
+export NUM_DEVICES=8
+bash scripts/run_onemaize_allcultivar_phase2_h200.sh train

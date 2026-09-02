@@ -1,12 +1,16 @@
 # OneMaize variant sampler audit
 
-Status: **IMPLEMENTED / WAITING FOR REAL DATA**
+Status: **EXPERIMENTAL / IMPLEMENTED / WAITING FOR REAL DATA**
+
+This sampler is not required by the formal schema-v3 all-cultivar Model B.
 
 Implemented behavior:
 
-- uniform genotype sampling before class sampling;
+- configured class sampling followed by uniform genotype sampling within the
+  genotypes that genuinely contain that class;
 - configurable probabilities with sum-to-one validation;
-- formal fail-fast and explicit pilot renormalization for missing classes;
+- global class fail-fast and explicit pilot renormalization when an entire class
+  is unavailable; B73 is not required to have B73-vs-B73 variant events;
 - SNP/small-indel event-centered crops;
 - span-aware crops when an event fits in 16K;
 - left/right breakpoint crops for events longer than 16K;

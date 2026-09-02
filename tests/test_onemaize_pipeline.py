@@ -13,6 +13,10 @@ from src.dataloaders.datasets.onemaize_dataset import (
 from src.dataloaders.onemaize_mlm import OneMaizeDNAMLM
 from src.onemaize.regions import NAM26_GENOTYPES, GenomeInput, build_onemaize_index
 from src.onemaize.model_budget import estimate_caduceus_parameters
+from src.onemaize.population_audit import (
+    audit_population_metadata,
+    write_population_audit,
+)
 
 
 class _Tokenizer:
@@ -332,3 +336,66 @@ def test_teacher_plan_model_budgets():
     assert 110_000_000 <= base["total"] <= 130_000_000
     assert 30_000_000 <= pilot["total"] <= 50_000_000
     assert legacy_width["total"] < 100_000_000
+
+
+def test_formal_model_b_config_is_schema_v3_region_aware():
+    from omegaconf import OmegaConf
+
+    root = Path(__file__).resolve().parents[1]
+    dataset = OmegaConf.load(
+        root / "configs/dataset/onemaize_allcultivar_phase2_16k_region_aware.yaml"
+    )
+    experiment = OmegaConf.load(
+        root / "configs/experiment/onemaize_allcultivar_phase2_16k_region_aware.yaml"
+    )
+    phase1 = OmegaConf.load(
+        root / "configs/experiment/onemaize_b73_phase1_8k_full_genome.yaml"
+    )
+    assert dataset.mode == "region_aware"
+    assert dataset.context_length == 16384
+    assert dataset.mlm_probability == 0.15
+    assert dataset.reverse_complement_probability == 0.5
+    assert [dataset.gene_probability, dataset.non_repeat_probability, dataset.te_rich_probability] == [0.5, 0.3, 0.2]
+    assert not any("variant_probability" in key for key in dataset.keys())
+    assert experiment.model.config == phase1.model.config
+    assert experiment.train.pretrained_model_strict_load is True
+
+
+def test_population_audit_reports_pool_distribution_without_enforcing_ratio(tmp_path):
+    _, output, _ = _write_fixture(tmp_path)
+    report, rows = audit_population_metadata(
+        output, context_length=128, formal=False, low_pool_warning=10
+    )
+    assert report["status"] == "PASS"
+    assert report["candidate_pool_distribution_is_training_distribution"] is False
+    assert report["training_sampling"]["region_class"] == {
+        "gene_centered": 0.5,
+        "non_repeat": 0.3,
+        "te_rich": 0.2,
+    }
+    assert len(rows) == 3
+    audit_dir = tmp_path / "population-audit"
+    write_population_audit(audit_dir, report, rows)
+    assert (audit_dir / "ALLCULTIVAR_INPUT_AUDIT.json").is_file()
+    assert (audit_dir / "ALLCULTIVAR_INPUT_AUDIT.md").is_file()
+    assert (audit_dir / "ALLCULTIVAR_CANDIDATE_COUNTS.csv").is_file()
+
+
+def test_checkpoint_evaluator_base_mode_does_not_require_schema_v4(tmp_path):
+    from types import SimpleNamespace
+    from scripts.evaluate_onemaize_checkpoints import _base_dataset
+
+    _, output, _ = _write_fixture(tmp_path)
+    args = SimpleNamespace(
+        base_data_dir=output,
+        split="test",
+        context_length=128,
+        samples_per_class=2,
+        seed=2357,
+        fasta_root=None,
+        variant_data_dir=None,
+    )
+    dataset = _base_dataset(args, _Tokenizer(), "te_rich")
+    assert len(dataset) == 2
+    assert {dataset.sample_metadata(index)["region_class"] for index in range(2)} == {"te_rich"}
+    dataset.close()

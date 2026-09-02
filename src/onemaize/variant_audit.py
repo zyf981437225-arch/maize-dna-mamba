@@ -169,7 +169,22 @@ def audit_variant_metadata(
         if counts_by_genotype_class[row["genotype"]][sampling_class] == 0
     ]
     if missing_classes:
-        message = "missing per-genotype variant classes: " + ", ".join(missing_classes)
+        warnings.append(
+            "missing per-genotype variant classes (eligible-genotype sampling applies): "
+            + ", ".join(missing_classes)
+        )
+    missing_global_classes = [
+        sampling_class
+        for sampling_class in required_variant_classes
+        if not any(
+            counts_by_genotype_class[row["genotype"]][sampling_class] > 0
+            for row in genomes
+        )
+    ]
+    if missing_global_classes:
+        message = "variant classes absent from all genotypes: " + ", ".join(
+            missing_global_classes
+        )
         if formal:
             errors.append(message)
         else:
@@ -239,6 +254,7 @@ def audit_variant_metadata(
         "pav_available": pav_available,
         "structural_variant_available": sv_available,
         "missing_classes": missing_classes,
+        "missing_global_classes": missing_global_classes,
         "candidate_event_coverage": {
             "audited_events": len(variants),
             "coordinate_valid_events": len(variants)

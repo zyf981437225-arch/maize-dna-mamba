@@ -7,6 +7,8 @@ Population-aware genomic language modeling for maize.
 > **B73 pipeline has been validated.**
 >
 > **NAM26 has not yet been run end-to-end on the final 26-genotype dataset.**
+>
+> **Current formal Model B status: READY FOR ALL-CULTIVAR DATA PREPARATION.**
 
 ## Project status
 
@@ -26,11 +28,11 @@ Population-aware genomic language modeling for maize.
 | Phase-II 16K candidate compatibility | **VALIDATED** | **IMPLEMENTED BUT NOT FORMALLY VALIDATED** |
 | Phase-II checkpoint continuation | **IMPLEMENTED BUT NOT FORMALLY VALIDATED** | **IMPLEMENTED BUT NOT FORMALLY VALIDATED** |
 | genotype-held-out validation/test | pilot only | **IMPLEMENTED BUT NOT FORMALLY VALIDATED** |
-| schema-v4 explicit variant metadata | 不需要 | **IMPLEMENTED，WAITING FOR REAL DATA** |
-| variant/TE-aware sampler and fixed evaluation | 不需要 | **IMPLEMENTED，WAITING FOR REAL DATA** |
+| formal Model B schema-v3 population training | 不适用 | **IMPLEMENTED BUT NOT FORMALLY VALIDATED** |
+| schema-v4 explicit variant extension | 不适用 | **EXPERIMENTAL，WAITING FOR REAL DATA** |
 | final training | 未完成 | 未完成 |
 
-当前 Phase-I production path 是 **B73-only**：builder 可接收 `--genotype` 和 `--chromosomes`，但 validator、dataset config、launcher 和一个 epoch 的已验证统计均固定为 B73 chr1–chr10；仓库没有把 26 个 full-genome manifest 合并为同一次 Phase-I 训练的入口。当前正式设计从同一个 B73 Phase-I checkpoint 分叉为 **Model A：B73 Phase-II** 与 **Model B：all-cultivar explicit variant/TE-aware Phase-II**。仓库仍保留普通 NAM26 schema-v3 region-aware 入口，但它不等同于 Model B，也不能写成 NAM26 全部材料共同完成 Phase-I。
+当前 Phase-I production path 是 **B73-only**。当前正式设计从同一个 B73 Phase-I checkpoint 分叉为 **Model A：B73 Phase-II** 与 **Model B：all-cultivar schema-v3 region-aware Phase-II**。Model B 通过多 cultivar FASTA 暴露隐式学习自然 genomic variation；gene GFF3 和 TE GFF3 显式参与 candidate construction。schema-v4 explicit variant sampling 是未来实验扩展，不是正式 Model B 的必需入口。
 
 ## Training design: two independent models
 
@@ -41,14 +43,13 @@ Population-aware genomic language modeling for maize.
                          |                                         |
                          v                                         v
  Model A: B73 Phase-II 16K region-aware       Model B: all-cultivar Phase-II 16K
- schema-v3 gene/non-repeat/TE-rich            schema-v3 candidates + schema-v4 events
-                         |                     SNP/indel/SV/PAV/TE-polymorphism
-                         v                                         |
- Reference maize genome language model                            v
-                                            Variant/transposon-aware maize model
+ schema-v3 gene/non-repeat/TE-rich            schema-v3 gene/non-repeat/TE-rich
+                         |                                         |
+                         v                                         v
+ Reference maize genome language model       Population-scale variation/TE-aware model
 ```
 
-Model A 保留现有 B73 Phase-II 三类 sampler。Model B 使用同一个 B73 Phase-I best checkpoint 通过 `train.pretrained_model_path` 严格加载权重，并新建 optimizer/scheduler。普通 NAM26 FASTA 混合或现有 `te_rich` 都不能替代 explicit variant/TE event annotation。
+两条路线都使用 `train.pretrained_model_path` 从同一个 B73 Phase-I best checkpoint 严格加载模型权重，并新建 optimizer/scheduler。Model B 先均匀采 genotype，再按 0.5/0.3/0.2 采 gene/non-repeat/TE-rich；26 个材料中 23 个进入 optimizer，1 个 validation、2 个 test。这里的 variation-aware 指 multi-cultivar sequence exposure，不表示当前正式训练显式读取 SNP/SV/PAV annotation。
 
 模型保持仓库现有的 `mamba_ssm.modules.mamba_simple.Mamba` 双向 Caduceus 实现，不是 Mamba2。正式模型为 24 layers、`d_model=864`、约 121,191,553 parameters，使用 BF16、15% MLM、80/10/10 corruption、single-base `A/C/G/T/N` tokenizer 和训练集 0.5 reverse-complement augmentation。
 
@@ -177,7 +178,7 @@ export GRAD_ACCUM=1
 export NUM_WORKERS=8
 ```
 
-Model A 将 `PHASE1_CKPT` 作为现有 B73 Phase-II 的 `INIT_CKPT`。Model B 必须先完成 schema-v4 build/audit，再把同一个 `PHASE1_CKPT` 交给 `run_onemaize_variant_te_phase2_h200.sh`。两条分支分别建立 optimizer/scheduler，互不 resume。详细命令见后文两个 Model Phase-II 章节。
+Model A 将 `PHASE1_CKPT` 作为 B73 Phase-II 的 `INIT_CKPT`。Model B 在 schema-v3 all-cultivar audit 通过后，把同一个 `PHASE1_CKPT` 交给 `run_onemaize_allcultivar_phase2_h200.sh`。两条分支分别建立 optimizer/scheduler，互不 resume。schema-v4/VCF 不属于本步骤的前置条件。
 
 ## Environment and dependencies
 
@@ -726,7 +727,7 @@ sbatch --export=ALL,STAGE=test \
 
 ## Model A Phase II — B73 16K annotation-aware context adaptation
 
-Phase-II 不是从头训练。`INIT_CKPT` 通过 `train.pretrained_model_path` 严格加载 Phase-I model state，并建立新的 Phase-II optimizer/scheduler；`RESUME_CKPT` 则恢复已经开始的 Phase-II 完整训练状态。两者不能同时设置。Model A 正式数据目录应只包含 B73；`scripts/run_onemaize_h200.sh` 仍可读取 NAM26 schema-v3，但那只是普通 population region-aware 训练，不是 Model B 的 explicit variant-aware path。
+Phase-II 不是从头训练。`INIT_CKPT` 通过 `train.pretrained_model_path` 严格加载 Phase-I model state，并建立新的 Phase-II optimizer/scheduler；`RESUME_CKPT` 则恢复已经开始的 Phase-II 完整训练状态。两者不能同时设置。Model A 正式数据目录只包含 B73；正式 all-cultivar Model B 使用后文独立 launcher。
 
 Phase-II region sampling：
 
@@ -865,11 +866,102 @@ sbatch --export=ALL,STAGE=test16k \
 
 **Pass condition**：test 只读取 TSV 中冻结的 2 个 test genotypes；无 train genotype 混入；指标有限且 checkpoint 与 run manifest 对应。
 
-## Model B Phase II — all-cultivar explicit variant/TE-aware adaptation
+## Model B Phase II — formal all-cultivar 16K region-aware continuation
 
-> **Current status: IMPLEMENTED / WAITING FOR REAL DATA.** 仓库没有真实 NAM26 VCF/SV/PAV/TE-polymorphism 文件，当前不能宣称可以正式训练。
+> **Current status: READY FOR ALL-CULTIVAR DATA PREPARATION.** 正式 Model B 不要求 VCF、SV/PAV 或 cultivar-specific TE insertion 文件；目前仍缺最终 26-genotype FASTA/GFF3 corpus 的完整构建与实机 audit。
 
-Model B 保留 schema-v3，并增加独立 schema-v4：
+正式 Model B 只使用 schema-v3：
+
+```text
+23 train genotypes (B73 included)
+          |
+uniform genotype sampling
+          |
+gene / non-repeat / TE-rich = 0.5 / 0.3 / 0.2
+          |
+dynamic 16,384-bp crop
+          |
+MLM continuation from B73 Phase-I best
+```
+
+不同 cultivar FASTA 自然携带 SNP、indel、SV、PAV 和 TE-related sequence differences，模型通过 population-scale sequence exposure 隐式学习这些差异。TE GFF3 则被显式用于 union repeat coverage 和 `te_rich` candidate classification。candidate pool 中各类数量不需要等于 50/30/20；训练 sampler 才执行 50/30/20。
+
+### 1 — Audit and validate schema-v3
+
+```bash
+export RUN_ROOT="$ONEMAIZE_ROOT/runs/allcultivar_phase2"
+export ONEMAIZE_DATA_DIR="$ONEMAIZE_ROOT/metadata/nam26_schema_v3"
+
+bash scripts/run_onemaize_allcultivar_phase2_h200.sh audit
+bash scripts/run_onemaize_allcultivar_phase2_h200.sh validate
+```
+
+audit 输出每个 genotype 的 FASTA/FAI/GZI/gene GFF3/TE GFF3 状态、split、三类 candidate count、candidate length、N fraction、repeat fraction 和空 pool。少量 candidate 只产生 warning；空 pool、short candidate、缺文件或 split leakage 才会阻止训练。
+
+### 2 — Benchmark and smoke
+
+```bash
+bash scripts/run_onemaize_allcultivar_phase2_h200.sh benchmark
+
+export PHASE1_CKPT="$PHASE1_RUN_ROOT/train/checkpoints_best/val_loss.ckpt"
+unset RESUME_CKPT
+export MAX_STEPS=10 WARMUP_STEPS=2
+bash scripts/run_onemaize_allcultivar_phase2_h200.sh smoke
+```
+
+launcher 会拒绝非 B73、非 8K、非 `full_genome` 的初始化 checkpoint。Model A 的 B73 Phase-II checkpoint 不能作为 Model B 初始化 checkpoint。
+
+### 3 — Formal train and exact resume
+
+先根据 benchmark/smoke 冻结 `MAX_STEPS`、warmup、batch 和 checkpoint interval。0.5/0.3/0.2 是当前设计，**sampling ratio should later be evaluated by ablation**。
+
+```bash
+export PHASE1_CKPT="$PHASE1_RUN_ROOT/train/checkpoints_best/val_loss.ckpt"
+export MAX_STEPS=<benchmark-approved-steps>
+export WARMUP_STEPS=<approved-warmup>
+export CHECKPOINT_INTERVAL=<approved-interval>
+bash scripts/run_onemaize_allcultivar_phase2_h200.sh train
+
+# Exact Model-B resume only; restores optimizer/scheduler/global step.
+unset PHASE1_CKPT
+export RESUME_CKPT="$RUN_ROOT/train/checkpoints_resume/last.ckpt"
+bash scripts/run_onemaize_allcultivar_phase2_h200.sh train
+```
+
+resume gate 要求 checkpoint 内记录的 16K region-aware `dataset.data_dir` 与当前 all-cultivar metadata 相同，避免把 Model A checkpoint 误当作 Model B resume。
+
+### 4 — PBS 8×H200
+
+编辑并提交 [`pbs_scripts/run_onemaize_allcultivar_phase2.pbs`](pbs_scripts/run_onemaize_allcultivar_phase2.pbs)：
+
+```bash
+qsub -v ONEMAIZE_DATA_DIR="$ONEMAIZE_DATA_DIR",PHASE1_CKPT="$PHASE1_CKPT",MAX_STEPS="$MAX_STEPS",WARMUP_STEPS="$WARMUP_STEPS",CHECKPOINT_INTERVAL="$CHECKPOINT_INTERVAL" pbs_scripts/run_onemaize_allcultivar_phase2.pbs
+```
+
+PBS 示例使用 `rt_HF`、project `gaa50089`、8 GPUs、CUDA 12.6.1 和 `rna-mamba` 环境；路径只存在于 PBS example，不进入 Python dataset/model。
+
+### 5 — Fair schema-v3-only evaluation
+
+不传 `--variant-data-dir` 即可在相同 deterministic schema-v3 16K set 上比较三条 checkpoint：
+
+```bash
+python scripts/evaluate_onemaize_checkpoints.py \
+  --checkpoint "phase1=$PHASE1_CKPT" \
+  --checkpoint "reference_phase2=$MODEL_A_CKPT" \
+  --checkpoint "population_phase2=$MODEL_B_CKPT" \
+  --base-data-dir "$ONEMAIZE_DATA_DIR" \
+  --split test --context-length 16384 --samples-per-class 256 \
+  --output-csv "$RUN_ROOT/checkpoint_comparison.csv" \
+  --output-markdown "$RUN_ROOT/checkpoint_comparison.md"
+```
+
+当前正式输出包括 overall、gene-centered、non-repeat、TE-rich、per-genotype、macro-class 和 macro-genotype metrics。
+
+## Future / Experimental Extension — explicit variant-aware schema-v4
+
+> **EXPERIMENTAL / WAITING FOR REAL DATA. Not required for the current formal Model B training path.** 仓库没有真实 NAM26 VCF/SV/PAV/TE-polymorphism 文件，因此本扩展不能正式训练，但不会阻塞 schema-v3 Model B。
+
+该未来扩展在 schema-v3 之外增加独立 schema-v4：
 
 ```text
 schema-v3: manifest.json + genomes.parquet + regions.parquet
@@ -927,7 +1019,7 @@ bash scripts/run_onemaize_variant_te_phase2_h200.sh smoke
 
 launcher 会检查 `PHASE1_CKPT` 的 stored config 必须是 B73、8,192 bp、`mode=full_genome`。不得传 Model A 的 B73 Phase-II checkpoint。
 
-### 5 — Formal train or exact resume
+### 5 — Experimental train or exact resume
 
 sampling pilot default 为 `gene/non-repeat/TE-rich/small-variant/SV-PAV/TE-variant = 0.20/0.15/0.15/0.20/0.20/0.10`。该比例只是可运行默认值，**sampling ratio requires ablation**；所有概率均在 YAML 中配置并强制和为 1。
 
@@ -988,7 +1080,16 @@ python scripts/evaluate_onemaize_checkpoints.py \
 - [ ] output/checkpoint filesystem has sufficient free space
 - [ ] final `MAX_STEPS`, warmup, batch and checkpoint interval frozen
 
-Model B additionally requires:
+Formal Model B additionally requires:
+
+- [ ] `ALLCULTIVAR_INPUT_AUDIT.json` reports PASS
+- [ ] 23/1/2 split is frozen and B73 is train
+- [ ] every genotype has FASTA/FAI/GZI, gene GFF3 and TE GFF3
+- [ ] every genotype × gene/non-repeat/TE-rich pool is non-empty
+- [ ] candidate length, N fraction and repeat coverage audit reviewed
+- [ ] `PHASE1_CKPT` gate confirms B73 8K `full_genome`
+
+Only the experimental schema-v4 extension additionally requires:
 
 - [ ] real per-genotype SNP/indel and SV/PAV inputs available
 - [ ] real cultivar-specific TE insertion/deletion annotation available
@@ -996,7 +1097,6 @@ Model B additionally requires:
 - [ ] schema-v4 `variant_manifest.json` and `variant_regions.parquet` built
 - [ ] variant audit reports no duplicate ID, out-of-FASTA event or split leakage
 - [ ] every enabled genotype/class pool is non-empty
-- [ ] `PHASE1_CKPT` gate confirms B73 8K `full_genome`; no Model-A Phase-II checkpoint used
 - [ ] sampling probabilities and ablation plan frozen
 
 > **任一必要项未通过，不要启动对应阶段的正式训练。**
@@ -1021,9 +1121,10 @@ du -sh "$ONEMAIZE_ROOT"/runs "$ONEMAIZE_ROOT"/runs/*/checkpoints* 2>/dev/null ||
 | Phase-II benchmark | `benchmark_16k_single_h200.json` |
 | Phase-II train | `16k/run_manifest.txt`, `16k/console.log`, best/resume checkpoint directories |
 | Phase-II test | `test16k/run_manifest.txt`, `test16k/test.log` |
-| Model B schema-v4 | `variant_manifest.json`, `variant_regions.parquet` |
-| Model B audit | `VARIANT_INPUT_AUDIT.md/.json`, `VARIANT_SAMPLER_AUDIT.md`, `VARIANT_SAMPLER_COUNTS.csv` |
-| Model B benchmark/train | `variant_te_phase2_h200.json`, `run_manifest.txt`, logs/checkpoints |
+| Formal Model B audit | `ALLCULTIVAR_INPUT_AUDIT.md/.json`, `ALLCULTIVAR_CANDIDATE_COUNTS.csv` |
+| Formal Model B benchmark/train | `allcultivar_phase2_16k_h200.json`, `run_manifest.txt`, logs/checkpoints |
+| Experimental schema-v4 | `variant_manifest.json`, `variant_regions.parquet` |
+| Experimental variant audit | `VARIANT_INPUT_AUDIT.md/.json`, `VARIANT_SAMPLER_AUDIT.md`, `VARIANT_SAMPLER_COUNTS.csv` |
 | Fair checkpoint evaluation | `checkpoint_comparison.csv`, `checkpoint_comparison.md` |
 
 原始 FASTA、annotation 和 checkpoints 不提交 Git。正式归档至少包括 Git commit、冻结 TSV、schema-v3 metadata、完整 Hydra config、Slurm job ID、benchmark JSON、console log、best/last checkpoint、split 和 validation/test 指标。
@@ -1089,17 +1190,17 @@ B73 schema-v3 metadata 的 16K candidate audit：
 
 ## NAM26 status and operational blockers
 
-NAM26 schema-v3 builder、formal gate、region-aware loader、16K continuation、Slurm training 和 held-out test 入口均已实现并有 synthetic tests；最终 26-genotype 数据尚未正式构建或运行。
+NAM26 schema-v3 builder、formal audit、region-aware loader、新的独立 all-cultivar 16K launcher、PBS entry 和 held-out deterministic evaluator 均已实现并有 synthetic tests；最终 26-genotype 数据尚未正式构建或运行。因此当前状态是 **READY FOR ALL-CULTIVAR DATA PREPARATION**，不是被 VCF 缺失阻塞。
 
 当前限制：
 
 1. **NAM26 Phase-I full-genome training is not implemented.** 当前 production Phase-I validator/config/launcher 是 B73-only；没有 26-genotype fixed-manifest aggregator 或 population Phase-I loader。
 2. **Formal held-out genotypes are not frozen in the repository.** 运行者必须在 `onemaize_26.tsv` 构建前确定 1 val + 2 test。
-3. **No dedicated distributed 8×H200 Phase-II benchmark entry exists.** `benchmark_onemaize.py` 是单进程 benchmark；真实 8 卡吞吐要从短 `STAGE=16k` 作业获得。
-4. **Two Phase-II experiment YAMLs are not wired identically.** H200 launcher 实际调用 `onemaize_b73_16k.yaml`，不是 `onemaize_b73_phase2_16k_region_aware.yaml`；正式记录必须以 launcher 输出的 Hydra config 为准。
-5. `audit_onemaize_phase2_candidate_lengths.py` 的结论文字仍为 B73-specific；用于 NAM26 时数值覆盖全部 metadata，但报告措辞尚未泛化。
+3. **8×H200 throughput has not been measured.** 新 launcher 的 benchmark stage 是单 GPU；真实 8 卡吞吐仍需从 smoke/train log 获取。
+4. **Final all-cultivar schema-v3 metadata has not been audited.** 只有 audit PASS 后，状态才能升级为 READY FOR BENCHMARK。
+5. **Explicit variant annotations remain unavailable.** 这只阻塞 experimental schema-v4 extension，不阻塞正式 Model B。
 
-这些限制不阻止 Model A 在 B73 数据上试运行，也不阻止 Model B 在真实、已映射的 all-cultivar variant/TE 数据到位并通过 schema-v4 audit 后试运行；但它们阻止将仓库描述为“26 个 genotype 全部完成 exhaustive Phase-I”“Model B 已有真实数据验证”或“已有完整 8×H200 benchmark”。
+正式 Model B 只等待 26-genotype FASTA/FAI/GZI、gene GFF3、TE GFF3 和冻结 split；不等待 VCF。上述限制阻止将仓库描述为“Model B 已完成真实数据验证”或“已完成 8×H200 benchmark/formal training”。
 
 ## Repository map
 
@@ -1109,12 +1210,14 @@ configs/
 │   ├── onemaize_b73_phase1_8k_full_genome.yaml   # B73 fixed-manifest dataset
 │   ├── onemaize_b73_phase2_16k_region_aware.yaml # explicit 16K region dataset
 │   ├── onemaize_dna_mlm.yaml                     # schema-v3 region-aware defaults
-│   └── onemaize_allcultivar_phase2_variant_te_16k.yaml # Model B dataset
+│   ├── onemaize_allcultivar_phase2_16k_region_aware.yaml # formal Model B
+│   └── onemaize_allcultivar_phase2_variant_te_16k.yaml # experimental extension
 └── experiment/
     ├── onemaize_b73_phase1_8k_full_genome.yaml   # current Phase-I experiment
     ├── onemaize_b73_16k.yaml                     # config used by H200 16K launcher
     ├── onemaize_b73_phase2_16k_region_aware.yaml # explicit Phase-II config, not launcher default
-    └── onemaize_allcultivar_phase2_variant_te_16k.yaml # Model B experiment
+    ├── onemaize_allcultivar_phase2_16k_region_aware.yaml # formal Model B
+    └── onemaize_allcultivar_phase2_variant_te_16k.yaml # experimental extension
 
 scripts/
 ├── build_b73_phase1_8k_manifest.py               # B73 fixed 8K index
@@ -1127,11 +1230,14 @@ scripts/
 ├── audit_onemaize_phase2_candidate_lengths.py     # 16K candidate-length audit
 ├── benchmark_onemaize.py                          # single-process region benchmark
 ├── run_onemaize_h200.sh                           # schema-v3 region-aware H200 stages
+├── audit_onemaize_allcultivar.py                  # formal Model B schema-v3 audit
+├── check_onemaize_checkpoint_contract.py          # branch/resume provenance gate
+├── run_onemaize_allcultivar_phase2_h200.sh         # formal Model B launcher
 ├── build_onemaize_variant_metadata.py             # schema-v4 VCF builder
-├── audit_onemaize_variant_te.py                   # Model B preflight gate
+├── audit_onemaize_variant_te.py                   # experimental preflight gate
 ├── validate_onemaize_variant_te.py                # deterministic reads/crops
 ├── evaluate_onemaize_checkpoints.py               # fair checkpoint comparison
-└── run_onemaize_variant_te_phase2_h200.sh          # Model B H200/PBS-safe launcher
+└── run_onemaize_variant_te_phase2_h200.sh          # experimental launcher
 
 slurm_scripts/
 ├── run_onemaize_phase1_h200.slurm
@@ -1139,11 +1245,13 @@ slurm_scripts/
 
 src/
 ├── onemaize/regions.py                            # schema-v3, TE union, candidate construction
+├── onemaize/population_audit.py                   # formal Model B audit
+├── onemaize/checkpoint_contracts.py               # checkpoint branch gates
 ├── onemaize/variants.py                           # schema-v4 and coordinate conversion
-├── onemaize/variant_audit.py                      # Model B audit implementation
+├── onemaize/variant_audit.py                      # experimental audit implementation
 ├── onemaize/phase1_coverage.py                    # fixed-manifest DDP coverage metrics
 ├── dataloaders/onemaize_mlm.py                    # Phase-I/Phase-II data module
-├── dataloaders/onemaize_variant_mlm.py            # Model B data module
+├── dataloaders/onemaize_variant_mlm.py            # experimental data module
 └── dataloaders/datasets/
     ├── onemaize_phase1_dataset.py                 # fixed B73 windows and tail PAD
     ├── onemaize_dataset.py                        # 50/30/20 dynamic region sampler
@@ -1152,6 +1260,7 @@ src/
 docs/audits/onemaize_b73/                          # real B73 validation evidence
 docs/audits/onemaize_variant_te/                   # status and missing-input contract
 pbs_scripts/run_onemaize_variant_te_phase2.pbs     # 8×H200 PBS example
+pbs_scripts/run_onemaize_allcultivar_phase2.pbs    # formal Model B PBS example
 ```
 
 ## Troubleshooting

@@ -337,31 +337,34 @@ class OneMaizeVariantTEMLMDataset(OneMaizeRegionMLMDataset):
                 raise FileNotFoundError(fai)
             self.sequence_lengths[genotype] = read_fai_lengths(fai)
 
-        self.class_probabilities_by_genotype = {}
-        missing = []
-        for genotype in self.genotypes:
-            available = np.asarray(
-                [self._pool_exists(genotype, item) for item in SAMPLING_CLASSES],
-                dtype=bool,
+        # Experimental explicit-variant sampling chooses the class first and then
+        # samples uniformly from genotypes that genuinely contain that class.
+        # In particular, B73 is not required to contain B73-vs-B73 variants.
+        self.eligible_genotypes_by_class = {
+            sampling_class: tuple(
+                genotype
+                for genotype in self.genotypes
+                if self._pool_exists(genotype, sampling_class)
             )
-            active_missing = [
-                sampling_class
-                for sampling_class, probability, exists in zip(
-                    SAMPLING_CLASSES, probabilities, available
-                )
-                if probability > 0 and not exists
-            ]
-            if active_missing and self.missing_class_policy == "error":
-                missing.extend(f"{genotype}/{item}" for item in active_missing)
-                continue
-            adjusted = probabilities * available
-            if adjusted.sum() <= 0:
-                raise ValueError(f"No enabled sampling class for genotype {genotype}")
-            self.class_probabilities_by_genotype[genotype] = adjusted / adjusted.sum()
-        if missing:
-            raise ValueError(
-                "Missing required genotype/class pools: " + ", ".join(missing)
+            for sampling_class in SAMPLING_CLASSES
+        }
+        available_classes = np.asarray(
+            [bool(self.eligible_genotypes_by_class[item]) for item in SAMPLING_CLASSES],
+            dtype=bool,
+        )
+        missing = [
+            sampling_class
+            for sampling_class, probability, available in zip(
+                SAMPLING_CLASSES, probabilities, available_classes
             )
+            if probability > 0 and not available
+        ]
+        if missing and self.missing_class_policy == "error":
+            raise ValueError("Missing required sampling-class pools: " + ", ".join(missing))
+        adjusted = probabilities * available_classes
+        if adjusted.sum() <= 0:
+            raise ValueError("No enabled sampling class has an eligible genotype")
+        self.sampling_probabilities = adjusted / adjusted.sum()
         self.variant_source_counts = {
             sampling_class: sum(
                 len(self.variant_grouped_indices.get((genotype, sampling_class), ()))
@@ -376,10 +379,13 @@ class OneMaizeVariantTEMLMDataset(OneMaizeRegionMLMDataset):
         return (genotype, sampling_class) in self.variant_grouped_indices
 
     def _sample_pool(self, rng: np.random.Generator) -> tuple[str, str]:
-        genotype = self.genotypes[int(rng.integers(0, len(self.genotypes)))]
-        probabilities = self.class_probabilities_by_genotype[genotype]
-        class_index = int(rng.choice(len(SAMPLING_CLASSES), p=probabilities))
-        return genotype, SAMPLING_CLASSES[class_index]
+        class_index = int(
+            rng.choice(len(SAMPLING_CLASSES), p=self.sampling_probabilities)
+        )
+        sampling_class = SAMPLING_CLASSES[class_index]
+        eligible = self.eligible_genotypes_by_class[sampling_class]
+        genotype = eligible[int(rng.integers(0, len(eligible)))]
+        return genotype, sampling_class
 
     def _sample_spec(
         self,

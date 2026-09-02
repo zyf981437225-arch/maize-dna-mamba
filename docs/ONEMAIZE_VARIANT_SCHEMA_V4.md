@@ -1,5 +1,8 @@
 # OneMaize variant metadata schema-v4
 
+> Experimental explicit variant-aware extension. This schema is implemented but
+> is not required for the current formal schema-v3 all-cultivar Model B.
+
 Schema-v4 is an independent metadata layer. It does not replace or modify schema-v3.
 
 ## Files

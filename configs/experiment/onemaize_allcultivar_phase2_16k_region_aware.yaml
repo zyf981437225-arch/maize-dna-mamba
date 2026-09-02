@@ -1,10 +1,9 @@
 # @package _global_
-# Experimental extension: initialize from B73 Phase-I best weights and start a
-# fresh 16K optimizer/scheduler over explicit variant/TE-polymorphism contexts.
+# Formal Model B: B73 Phase-I -> all-cultivar schema-v3 16K continuation.
 defaults:
   - /trainer: default
   - /loader: default
-  - /dataset: onemaize_allcultivar_phase2_variant_te_16k
+  - /dataset: onemaize_allcultivar_phase2_16k_region_aware
   - /task: lm
   - /optimizer: adamw
   - /scheduler: cosine_warmup_timm
@@ -48,8 +47,8 @@ train:
   mode: min
   test: false
   ckpt: null
-  # The launcher requires this to be the B73 Phase-I best checkpoint.
-  pretrained_model_path: null
+  # Strict model-only initialization; optimizer/scheduler start fresh.
+  pretrained_model_path: ???
   pretrained_model_strict_load: true
   pretrained_model_state_hook:
     _name_: null
@@ -61,7 +60,6 @@ trainer:
   precision: bf16
   max_epochs: null
   max_steps: ???
-  replace_sampler_ddp: true
   accumulate_grad_batches: 8
   gradient_clip_val: 0.5
   num_sanity_val_steps: 0
