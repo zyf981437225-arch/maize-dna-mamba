@@ -3,7 +3,6 @@ from typing import List
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from einops import rearrange
 
 import src.models.nn.utils as U
@@ -408,58 +407,9 @@ class AdaptiveLMTask(BaseTask):
         self.loss = loss
 
 
-class M6ASiteTask(BaseTask):
-    """Binary token classification restricted to labelled adenosines."""
-
-    def __init__(
-        self,
-        *args,
-        ignore_index: float = -100.0,
-        pos_weight="auto",
-        max_pos_weight: float = 100.0,
-        **kwargs,
-    ):
-        super().__init__(*args, **kwargs)
-        self.ignore_index = float(ignore_index)
-        if isinstance(pos_weight, str):
-            if pos_weight.lower() != "auto":
-                raise ValueError("pos_weight must be 'auto', null, or a positive number")
-            resolved_weight = float(getattr(self.dataset, "positive_weight", 1.0))
-        elif pos_weight is None:
-            resolved_weight = 1.0
-        else:
-            resolved_weight = float(pos_weight)
-        if resolved_weight <= 0:
-            raise ValueError("pos_weight must be positive")
-        self.pos_weight = min(resolved_weight, float(max_pos_weight))
-
-        def weighted_binary_cross_entropy(logits, target):
-            weight = logits.new_tensor(self.pos_weight)
-            return F.binary_cross_entropy_with_logits(
-                logits.squeeze(-1), target.float(), pos_weight=weight
-            )
-
-        self.loss = U.discard_kwargs(weighted_binary_cross_entropy)
-        self.loss_val = self.loss
-
-    def forward(self, batch, encoder, model, decoder, _state):
-        logits, target, kwargs = super().forward(batch, encoder, model, decoder, _state)
-        if logits.ndim != 3 or logits.shape[-1] != 1:
-            raise ValueError(f"m6A decoder must return [B, L, 1], got {tuple(logits.shape)}")
-        if target.shape != logits.shape[:2]:
-            raise ValueError(
-                f"m6A target shape {tuple(target.shape)} does not match logits {tuple(logits.shape)}"
-            )
-        selected = target != self.ignore_index
-        if not torch.any(selected):
-            raise ValueError("Batch contains no candidate adenosines")
-        return logits[selected].reshape(-1, 1), target[selected].reshape(-1), kwargs
-
-
 registry = {
     'base': BaseTask,
     'multiclass': MultiClass,
     'lm': LMTask,
     'hg38': HG38Task,
-    'm6a_site': M6ASiteTask,
 }

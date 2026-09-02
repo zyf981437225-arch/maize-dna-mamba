@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+#PBS -N onemaize_b73_phase1
+#PBS -q rt_HF
+#PBS -P gaa50089
+#PBS -l select=1
+#PBS -l walltime=240:00:00
+#PBS -j oe
+
+set -euo pipefail
+module load cuda/12.6/12.6.1
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate rna-mamba
+
+PROJECT_ROOT=/home/acd13855wx/projects/onemaize_project/onemaize
+cd "$PROJECT_ROOT"
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export NUM_DEVICES=8 BATCH_SIZE=1 BATCH_SIZE_EVAL=1 NUM_WORKERS=8
+export ONEMAIZE_B73_FASTA="$PROJECT_ROOT/raw/B73/genome.fa.gz"
+# Edit only this line if the generated Phase-I parquet is stored elsewhere.
+export ONEMAIZE_PHASE1_MANIFEST="$PROJECT_ROOT/data/processed/onemaize_b73_phase1_8k/b73_phase1_8k_full_genome.parquet"
+export RUN_ROOT="$PROJECT_ROOT/runs/b73_phase1_8k"
+export MAX_STEPS=325300 WARMUP_STEPS=16265 CHECKPOINT_INTERVAL=16265
+
+test -s "$ONEMAIZE_B73_FASTA"
+test -s "$ONEMAIZE_B73_FASTA.fai"
+test -s "$ONEMAIZE_B73_FASTA.gzi"
+test -s "$ONEMAIZE_PHASE1_MANIFEST"
+df -h "$PROJECT_ROOT"
+
+bash scripts/run_onemaize_phase1_h200.sh validate
+bash scripts/run_onemaize_phase1_h200.sh benchmark
+bash scripts/run_onemaize_phase1_h200.sh smoke
+bash scripts/run_onemaize_phase1_h200.sh train

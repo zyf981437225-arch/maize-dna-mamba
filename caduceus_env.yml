@@ -328,4 +328,3 @@ dependencies:
       - xxhash==3.6.0
       - yarl==1.22.0
       - zipp==3.23.0
-prefix: /home/zys/miniconda3/envs/caduceus_env

@@ -73,7 +73,7 @@ loader:
   drop_last: false
 
 optimizer:
-  lr: 4e-5
+  lr: 8e-5
   weight_decay: 0.01
   betas: [0.9, 0.98]
 
@@ -81,5 +81,5 @@ scheduler:
   t_in_epochs: false
   t_initial: ${trainer.max_steps}
   warmup_t: ???
-  lr_min: 1e-5
+  lr_min: 2e-5
   warmup_lr_init: 1e-6

@@ -3,18 +3,11 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
-from pathlib import Path
-
 import torch
-from torch.utils.data import DataLoader
 
 from caduceus.configuration_caduceus import CaduceusConfig
 from caduceus.modeling_caduceus import CaduceusForMaskedLM
 from caduceus.tokenization_caduceus import CaduceusTokenizer
-from src.dataloaders.datasets.genomic_dna_dataset import (
-    IndexedGenomicDNAMLMDataset,
-    collate_genomic_dna_mlm,
-)
 
 
 def build_tokenizer(window_size: int) -> CaduceusTokenizer:
@@ -24,42 +17,6 @@ def build_tokenizer(window_size: int) -> CaduceusTokenizer:
         add_special_tokens=False,
         padding_side="right",
     )
-
-
-def load_batch(
-    data_dir: Path,
-    *,
-    split: str,
-    window_size: int,
-    batch_size: int,
-    mlm_probability: float,
-    seed: int,
-):
-    tokenizer = build_tokenizer(window_size)
-    dataset = IndexedGenomicDNAMLMDataset(
-        data_dir,
-        tokenizer=tokenizer,
-        split=split,
-        window_size=window_size,
-        mlm_probability=mlm_probability,
-        deterministic_mlm=True,
-        seed=seed,
-        max_windows=batch_size,
-    )
-    if len(dataset) < batch_size:
-        raise ValueError(
-            f"Split {split!r} has {len(dataset)} windows, fewer than batch_size={batch_size}"
-        )
-    loader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        collate_fn=lambda batch: collate_genomic_dna_mlm(
-            batch, pad_token_id=int(tokenizer.pad_token_id)
-        ),
-    )
-    input_ids, labels, metadata = next(iter(loader))
-    return tokenizer, input_ids, labels, metadata
 
 
 def build_model(

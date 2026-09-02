@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+#PBS -N onemaize_nam26_phase2
+#PBS -q rt_HF
+#PBS -P gaa50089
+#PBS -l select=1
+#PBS -l walltime=120:00:00
+#PBS -j oe
+
+set -euo pipefail
+module load cuda/12.6/12.6.1
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate rna-mamba
+
+PROJECT_ROOT=/home/acd13855wx/projects/onemaize_project/onemaize
+cd "$PROJECT_ROOT"
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export NUM_DEVICES=8 BATCH_SIZE=1 BATCH_SIZE_EVAL=1 GRAD_ACCUM=8 NUM_WORKERS=8
+export ONEMAIZE_DATA_DIR="$PROJECT_ROOT/data/processed/onemaize_nam26"
+export PHASE1_CKPT="$PROJECT_ROOT/runs/b73_phase1_8k/train/checkpoints_best/val_loss.ckpt"
+export RUN_ROOT="$PROJECT_ROOT/runs/nam26_phase2_16k"
+export TRAIN_SAMPLES_PER_EPOCH=100000 VAL_SAMPLES_PER_EPOCH=2048 TEST_SAMPLES_PER_EPOCH=2048
+export MAX_STEPS=15630 WARMUP_STEPS=782 CHECKPOINT_INTERVAL=782
+
+test -s "$ONEMAIZE_DATA_DIR/manifest.json" || { echo "Missing NAM26 schema-v3 manifest" >&2; exit 2; }
+test -s "$ONEMAIZE_DATA_DIR/genomes.parquet" || { echo "Missing genomes.parquet" >&2; exit 2; }
+test -s "$ONEMAIZE_DATA_DIR/regions.parquet" || { echo "Missing regions.parquet" >&2; exit 2; }
+test -s "$PHASE1_CKPT" || { echo "Missing B73 Phase-I checkpoint" >&2; exit 2; }
+df -h "$PROJECT_ROOT"
+
+bash scripts/run_onemaize_allcultivar_phase2_h200.sh audit
+bash scripts/run_onemaize_allcultivar_phase2_h200.sh validate
+bash scripts/run_onemaize_allcultivar_phase2_h200.sh benchmark
+bash scripts/run_onemaize_allcultivar_phase2_h200.sh smoke
+bash scripts/run_onemaize_allcultivar_phase2_h200.sh train

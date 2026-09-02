@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# INTERNAL / ALTERNATE SCHEDULER: formal teacher workflow uses numbered PBS files.
 #SBATCH --job-name=onemaize-p1
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=8

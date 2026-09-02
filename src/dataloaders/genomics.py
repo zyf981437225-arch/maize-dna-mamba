@@ -20,8 +20,6 @@ from src.dataloaders.datasets.hg38_char_tokenizer import CharacterTokenizer
 from src.dataloaders.datasets.kmer_tokenizer import KmerTokenizer
 from src.dataloaders.datasets.hg38_dataset import HG38Dataset
 from src.dataloaders.datasets.bacteria_txt_dataset import BacteriaTxtDataset
-from src.dataloaders.datasets.rnacentral_fasta_dataset import RNACentralFastaDataset
-from src.dataloaders.datasets.mixed_rna_dataset import MixedRNADataset
 from src.dataloaders.datasets.nucleotide_transformer_dataset import NucleotideTransformerDataset
 from src.dataloaders.fault_tolerant_sampler import FaultTolerantDistributedSampler
 from src.dataloaders.fault_tolerant_sampler import RandomFaultTolerantSampler
@@ -64,18 +62,11 @@ class HG38(SequenceDataset):
         # extra dataset config fields
         self.dataset_name = kwargs.pop("dataset_name", None)
         self.text_file = kwargs.pop("text_file", None)
-        self.rna_fasta_file = kwargs.pop("rna_fasta_file", None)
         if self.text_file is not None:
             self.text_file = to_absolute_path(self.text_file)
-        if self.rna_fasta_file is not None:
-            self.rna_fasta_file = to_absolute_path(self.rna_fasta_file)
         self.ignore_id = kwargs.pop("ignore_id", None)
         self.kmer = kwargs.pop("kmer", 1)
         self.frame = kwargs.pop("frame", 0)
-
-        # optional controls for mixed dataset
-        self.max_text_sequences = kwargs.pop("max_text_sequences", None)
-        self.max_fasta_sequences = kwargs.pop("max_fasta_sequences", None)
 
         self.dataset_config_name = dataset_config_name
         self.tokenizer_name = tokenizer_name
@@ -231,118 +222,7 @@ class HG38(SequenceDataset):
             return
 
         # ------------------------------------------------------------------
-        # 2) rnacentral fasta only
-        # ------------------------------------------------------------------
-        if self.dataset_name == "rnacentral_fasta" and self.rna_fasta_file is not None:
-            base_dataset = RNACentralFastaDataset(
-                fasta_file=self.rna_fasta_file,
-                tokenizer=self.tokenizer,
-                max_length=self.max_length,
-                add_eos=self.add_eos,
-                mlm=True,
-                mlm_probability=self.mlm_probability,
-                ignore_id=ignore_id,
-                kmer=self.kmer,
-                frame=self.frame,
-            )
-
-            train_idx, val_idx, test_idx = self._make_splits(len(base_dataset))
-
-            train_ds = RNACentralFastaDataset(
-                fasta_file=self.rna_fasta_file,
-                tokenizer=self.tokenizer,
-                max_length=self.max_length,
-                add_eos=self.add_eos,
-                mlm=self.mlm,
-                mlm_probability=self.mlm_probability,
-                ignore_id=ignore_id,
-                kmer=self.kmer,
-                frame=self.frame,
-            )
-
-            val_ds = RNACentralFastaDataset(
-                fasta_file=self.rna_fasta_file,
-                tokenizer=self.tokenizer,
-                max_length=self.max_length_val,
-                add_eos=self.add_eos,
-                mlm=self.mlm,
-                mlm_probability=self.mlm_probability,
-                ignore_id=ignore_id,
-                kmer=self.kmer,
-                frame=self.frame,
-            )
-
-            test_ds = RNACentralFastaDataset(
-                fasta_file=self.rna_fasta_file,
-                tokenizer=self.tokenizer,
-                max_length=self.max_length_test,
-                add_eos=self.add_eos,
-                mlm=self.mlm,
-                mlm_probability=self.mlm_probability,
-                ignore_id=ignore_id,
-                kmer=self.kmer,
-                frame=self.frame,
-            )
-
-            self.dataset_train = Subset(train_ds, train_idx)
-            self.dataset_val = Subset(val_ds, val_idx)
-            self.dataset_test = Subset(test_ds, test_idx)
-
-            return
-
-        # ------------------------------------------------------------------
-        # 3) mixed txt + fasta
-        # ------------------------------------------------------------------
-        if self.dataset_name == "mixed_rna":
-            if self.text_file is None and self.rna_fasta_file is None:
-                raise ValueError("For dataset_name='mixed_rna', provide text_file and/or rna_fasta_file.")
-
-            base_dataset = MixedRNADataset(
-                tokenizer=self.tokenizer,
-                text_file=self.text_file,
-                fasta_file=self.rna_fasta_file,
-                max_length=self.max_length,
-                add_eos=self.add_eos,
-                mlm=True,
-                mlm_probability=self.mlm_probability,
-                ignore_id=ignore_id,
-                kmer=self.kmer,
-                frame=self.frame,
-                max_text_sequences=self.max_text_sequences,
-                max_fasta_sequences=self.max_fasta_sequences,
-            )
-
-            train_idx, val_idx, test_idx = self._make_splits(len(base_dataset))
-
-            # Shallow copies share the immutable sequence/source lists. This
-            # avoids parsing and storing the complete corpus three more times
-            # in every DDP process.
-            train_ds = copy.copy(base_dataset)
-            val_ds = copy.copy(base_dataset)
-            test_ds = copy.copy(base_dataset)
-
-            train_ds.max_length = self.max_length
-            train_ds.mlm = self.mlm
-            train_ds.deterministic_mlm = False
-
-            val_ds.max_length = self.max_length_val
-            val_ds.mlm = self.mlm
-            val_ds.deterministic_mlm = True
-            val_ds.mlm_seed = self.val_split_seed + 10_000
-
-            test_ds.max_length = self.max_length_test
-            test_ds.mlm = self.mlm
-            test_ds.deterministic_mlm = True
-            test_ds.mlm_seed = self.val_split_seed + 20_000
-
-            self.dataset_train = Subset(train_ds, train_idx)
-            self.dataset_val = Subset(val_ds, val_idx)
-            self.dataset_test = Subset(test_ds, test_idx)
-
-            return
-
-        # ------------------------------------------------------------------
-        # 4) original hg38 fallback
+        # 2) original hg38 fallback
         # ------------------------------------------------------------------
         self.dataset_train, self.dataset_val, self.dataset_test = [
             HG38Dataset(

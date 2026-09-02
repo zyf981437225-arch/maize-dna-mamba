@@ -1,26 +1,17 @@
-_name_: hg38          # ✅ 这个已经是 hg38，保持不变
-
-bed_file: null        # ✅ 补上这两行
-fasta_file: null      # ✅ 补上这两行
-
+_name_: hg38
+bed_file: null
+fasta_file: null
 dataset_name: bacteria_txt
-
-text_file: /home/zys/caduceus-main/data/data-random_15K_sequences(1).txt
-
+text_file: ${oc.env:BACTERIA_TEXT_FILE,data/bacteria/sequences.txt}
 max_length: 1024
-
 batch_size: 64
 batch_size_eval: 128
-
 num_workers: 12
 shuffle: true
-
 tokenizer_name: char
 add_eos: true
-
 mlm: true
 mlm_probability: 0.15
-
 rc_aug: true
 max_length_val: 1024
 max_length_test: 1024

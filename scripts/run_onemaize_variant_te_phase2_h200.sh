@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# EXPERIMENTAL: schema-v4 variant/TE extension; not part of the formal workflow.
 set -euo pipefail
 
 # Model B launcher. Run once inside a Slurm, PBS, or interactive allocation.

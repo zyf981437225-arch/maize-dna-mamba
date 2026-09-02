@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# INTERNAL implementation used by pbs_scripts/01_b73_phase1_train.pbs.
 # Production Phase-I launcher for a single GPU node. No command uploads FASTA
 # or checkpoints. In a Slurm allocation the launcher starts one task per GPU.
 STAGE="${1:-validate}"
